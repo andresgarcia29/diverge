@@ -62,7 +62,57 @@ helm upgrade --install diverge charts/diverge \
 
 ---
 
-## 3. Creating an `AgentTask`
+## 3. Repository Configuration (`.diverge/agent.yaml`), `diverge task` CLI & Creating an `AgentTask`
+
+### Scaffold `.diverge/agent.yaml` with `diverge task init`
+
+Run `diverge task init` inside your repository to generate `.diverge/agent.yaml` with default model capabilities, allowed tools, budget caps, and sandbox settings:
+
+```bash
+diverge task init
+```
+
+```yaml
+# .diverge/agent.yaml
+version: "1"
+agent:
+  capabilities:
+    - claude-3-7-sonnet
+    - gemini-2.5-pro
+  allowedTools:
+    - git
+    - go
+    - npm
+    - pytest
+    - diverge_*
+  budgetUSD: "5.00"
+  maxIterations: 5
+  baseBranch: main
+  sandbox:
+    provider: agent-sandbox
+    timeoutSeconds: 3600
+```
+
+### Create & Manage Tasks from the CLI (`diverge task`)
+
+```bash
+# Submit an autonomous task from your terminal
+diverge task create "Diagnose and fix N+1 query in /api/v1/checkout" --budget 5.00 --base-branch main
+
+# List tasks, inspect status, or stream live sandbox logs
+diverge task list
+diverge task status fix-checkout-latency
+diverge task logs fix-checkout-latency -f
+
+# Send real-time steering guidance (delivered on the next metering heartbeat)
+diverge task guide fix-checkout-latency "Ensure backward compatibility with API v1 clients"
+
+# Pause and resume with an additive budget bump (+$15.00 USD and +2,000,000 tokens)
+diverge task pause fix-checkout-latency
+diverge task resume fix-checkout-latency --budget +15.00 --tokens 2000000
+```
+
+### Declarative `AgentTask` Custom Resource
 
 Apply an `AgentTask` Custom Resource directly with `kubectl` or via `diverge mcp`:
 
@@ -72,6 +122,9 @@ kind: AgentTask
 metadata:
   name: fix-checkout-latency
   namespace: default
+  annotations:
+    divergedev.com/preview-enabled: "true"
+    divergedev.com/preview-service: "checkout-api"
 spec:
   objective: "Diagnose and fix N+1 query in /api/v1/checkout and verify in a preview environment"
   draftPR: true
@@ -87,8 +140,7 @@ spec:
     - gemini-2.5-pro
   sandbox:
     provider: agent-sandbox
-    templateName: default
-    serviceAccountName: default
+    templateRef: default
     timeoutSeconds: 1800
 ```
 
@@ -122,15 +174,17 @@ When resumed, `diverge-controller` mints a new Macaroon capability token reflect
 
 ## 5. Live LLM Cost & Token Enforcement (`POST /api/v1/agenttask/meter`)
 
-Sandbox LLM proxies and agent runtimes report incremental token and USD consumption to `diverge-server` via `POST /api/v1/agenttask/meter`, authenticating with the mounted Macaroon capability token (`Authorization: Bearer <macaroon-token>`).
+Sandbox LLM proxies and agent runtimes report incremental token and USD consumption (with an idempotent `requestId` and `iteration`) to `diverge-server` via `POST /api/v1/agenttask/meter`, authenticating with the mounted Macaroon capability token (`Authorization: Bearer <macaroon-token>`).
 
 ### Request & Response
 
 ```bash
-curl -s -X POST "https://diverge-server.diverge-system.svc:8443/api/v1/agenttask/meter" \
+curl -s -X POST "$DIVERGE_METER_URL" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $(cat /etc/diverge/token/token)" \
   -d '{
+    "requestId": "fix-checkout-iter-1",
+    "iteration": 1,
     "model": "claude-3-7-sonnet",
     "tokensUsed": 1500,
     "costUSD": 0.0225
@@ -143,13 +197,17 @@ curl -s -X POST "https://diverge-server.diverge-system.svc:8443/api/v1/agenttask
   "allowed": true,
   "suspended": false,
   "totalTokensUsed": 1500,
-  "totalCostUSD": 0.0225
+  "totalCostUSD": 0.0225,
+  "iteration": 1,
+  "maxIterations": 8,
+  "guidance": "Ensure backward compatibility with API v1 clients",
+  "previewUrl": "https://preview.example.com"
 }
 ```
 
 ### Node.js & Python SDK Metering Helpers
 
-Both `@divergedev/sdk` (Node.js) and `diverge-sdk` (Python) include built-in metering helpers that automatically read `DIVERGE_MACAROON_TOKEN` or `/etc/diverge/token/token`:
+Both `@divergedev/sdk` (Node.js) and `diverge-sdk` (Python) include built-in metering helpers that automatically read `DIVERGE_MACAROON_TOKEN` or `/etc/diverge/token/token` and surface live steering `guidance` and `previewUrl`:
 
 ```typescript
 // Node.js (@divergedev/sdk)
@@ -157,10 +215,15 @@ import { meterLLMUsage, LLMMeterError } from '@divergedev/sdk';
 
 try {
   const res = await meterLLMUsage({
+    requestId: 'fix-checkout-iter-1',
+    iteration: 1,
     model: 'claude-3-7-sonnet',
     tokensUsed: 1500,
     costUSD: 0.0225,
   });
+  if (res.guidance) {
+    console.log('Live steering guidance:', res.guidance);
+  }
 } catch (err) {
   if (err instanceof LLMMeterError && err.isBudgetExceeded) {
     process.exit(0); // Task auto-paused by diverge-server
@@ -178,7 +241,11 @@ try:
         model="claude-3-7-sonnet",
         tokens_used=1500,
         cost_usd=0.0225,
+        request_id="fix-checkout-iter-1",
+        iteration=1,
     )
+    if res.guidance:
+        print("Live steering guidance:", res.guidance)
 except LLMMeterError as err:
     if err.is_budget_exceeded:
         raise SystemExit(0)
@@ -186,8 +253,9 @@ except LLMMeterError as err:
 ```
 
 ### Guardrails Enforced by `/api/v1/agenttask/meter`
-- **Model Restriction Enforcement (`403 Forbidden`)**: If the capability token has `allowed_models` caveats (`spec.capabilities`), requests that omit `model` or specify a model not in `allowed_models` are rejected immediately with `403 Forbidden`.
-- **Automatic Budget Enforcement (`429 Too Many Requests`)**: When cumulative `totalCostUSD` or `totalTokensUsed` exceeds the Macaroon caveat or `AgentTask` spec (`budgetUSD` / `budgetTokens`), `diverge-server`:
+- **Idempotency (`requestId` & `status.lastMeterRequestIds`)**: Retried metering calls with the same `requestId` (tracked in a bounded 32-entry ring buffer on `AgentTaskStatus`) return current totals and live `guidance`/`previewUrl` without double-charging tokens, cost, or iterations.
+- **Model Restriction Enforcement (`403 Forbidden`)**: If the capability token has `allowed_models` caveats (`spec.capabilities`, supporting exact or prefix wildcards like `claude-*`), requests that omit `model` or specify a model not permitted by `allowed_models` are rejected immediately with `403 Forbidden`.
+- **Automatic Budget & Iteration Enforcement (`429 Too Many Requests`)**: When cumulative `totalCostUSD`, `totalTokensUsed`, or `iteration` exceeds the Macaroon caveat or `AgentTask` spec (`budgetUSD` / `budgetTokens` / `maxIterations`), `diverge-server`:
   1. Transitions the `AgentTask` status phase to `Paused`.
   2. Sets `spec.suspended = true`.
   3. Revokes the capability token in `diverge-agenttask-tokens`.

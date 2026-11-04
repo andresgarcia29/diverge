@@ -56,3 +56,10 @@ To resolve preview-isolated Redis / Valkey keys (`preview:<env>:<key>` in previe
 key := sdk.ResolveRedisKey(ctx, "cart:user-42")
 ```
 (Equivalent helpers are available in Node.js via `resolveRedisKey` in `@divergedev/sdk` and Python via `resolve_redis_key` in `diverge-sdk`.)
+
+### S3 / GCS / MinIO Object Storage Key Resolution
+When `protocol: s3`, `protocol: gcs`, or `protocol: minio` is configured in `asyncRoutes`, Diverge injects `DIVERGE_STORAGE_PREFIX` (`previews/<namespace>/<env>/` or `previews/<namespace>/<env>/<target>/`), `S3_KEY_PREFIX`, `AWS_S3_PREFIX`, and `GCS_KEY_PREFIX`, and purges the preview prefix upon environment teardown. Resolve object keys in application code using:
+```go
+objectKey := sdk.ResolveStorageKey(ctx, "avatars/user-1.png")
+```
+(Equivalent helpers are available in Node.js via `resolveStorageKey` in `@divergedev/sdk` and Python via `resolve_storage_key` in `diverge-sdk`.)

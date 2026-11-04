@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.19.0] - 2026-11-04
+
+### 🚀 Highlights & New Features
+
+#### 🤖 `AgentTask` Production Readiness, `.diverge/agent.yaml` & `diverge task` CLI
+- **Spec-Driven Agent Task CLI (`internal/cli/task*.go`) (#322)**: Added `diverge task init` (scaffolding `.diverge/agent.yaml`), `diverge task create`, `status`, `list`, `logs`, `guide`, `pause`, `resume` (with additive `--budget +15.00` and `--tokens` bumps), and `delete`.
+- **Idempotent LLM Metering & Live Steering (`internal/server/llm_meter.go`, `api/v1alpha1/agenttask_types.go`) (#322)**: Added `requestId` deduplication via a bounded 32-entry ring buffer (`status.lastMeterRequestIds`) on `AgentTaskStatus`, `iteration` / `maxIterations` enforcement, wildcard model capability matching (`MatchesAllowedModel`), and live `guidance` + `previewUrl` delivery in `POST /api/v1/agenttask/meter` responses (plus Python `diverge-sdk` and Node.js `@divergedev/sdk` updates).
+- **Sandbox Suspension & Linked Preview Hibernation (`internal/controller/agenttask_controller.go`, `internal/sandbox/`) (#322)**: Added `AgentTaskPhasePausing`, `SandboxSuspender` (`spec.operatingMode: Suspended` on `SandboxClaim` or pod scale-down), automatic hibernation of linked preview `Environment`s (`divergedev.com/hibernated: "true"`) on pause, and automatic wake-up + volume-projected Macaroon token rotation on resume.
+- **In-Cluster HTTP Port `8080` & `google/ax` Integration (`charts/diverge/`, `Dockerfile.agent-runner`, `internal/agentrunner/`) (#322)**: Exposed in-cluster HTTP port `8080` (`http-compat`) on `diverge-server`, wired `DIVERGE_MCP_URL` and `DIVERGE_METER_URL` into sandbox pods, and packaged `ax` inside `ghcr.io/divergedev/agent-runner`.
+
+---
+
 ## [v0.18.0] - 2026-10-17
 
 ### 🚀 Highlights & New Features

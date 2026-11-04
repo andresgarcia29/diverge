@@ -67,12 +67,13 @@ kind: PreviewGroup
 metadata:
   name: pr-101
 spec:
-  ttl: 2h
+  lifecycle:
+    ttl: 2h
   source:
     provider: github
     project: acme/payments
     branch: feat/instant-payouts
-    mergeRequestID: 101
+    mr: 101
   routing:
     headerKey: x-preview-env
     headerValue: pr-101

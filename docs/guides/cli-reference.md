@@ -33,8 +33,10 @@ The `diverge` CLI manages your local development environments and interacts with
 | `diverge providers list` | List all registered providers |
 | `diverge route <service>` | Simulate request routing to a service through the topology |
 | `diverge status` | Show active preview environments and groups |
+| `diverge task` | Manage spec-driven autonomous AI developer tasks (`init`, `create`, `status`, `list`, `logs`, `guide`, `pause`, `resume`, `delete`) |
 | `diverge top` | Live terminal dashboard (`watch`) of environments, FinOps burn rate, hibernation/drift state, and `AgentTask`s (`-o table\|json\|yaml`) |
 | `diverge validate` | Validate `.diverge.yaml` against JSON Schema or print the embedded schema (`--print-schema`) |
+| `diverge verify <env> [path]` | Run unified verification suite (`doctor` workload checks, routed HTTP readiness, latency SLOs, baseline parity, `$GITHUB_STEP_SUMMARY`) |
 | `diverge version` | Print version info |
 
 ## Detailed Command Usage
@@ -294,5 +296,60 @@ diverge top --once -A
 
 # Export machine-readable fleet snapshot as JSON
 diverge top -o json -A
+```
+
+### `diverge verify`
+
+Run a unified verification suite against a preview `Environment` or `PreviewGroup` combining Kubernetes workload diagnostics (`doctor`), routed HTTP readiness probes (with automatic `x-diverge-env` and W3C `baggage` injection), latency SLO assertions, response body substring checks, and optional baseline parity comparisons.
+
+**Usage:** `diverge verify <env-name> [path-or-url] [flags]`
+
+**Flags:**
+- `--path` — HTTP path(s) to probe (repeatable, default: `["/"]`)
+- `--expect-status` — Expected HTTP status code (default: `0`, accepting any `2xx`/`3xx` status `< 400`)
+- `--max-latency` — Maximum acceptable preview response latency (e.g., `500ms`)
+- `--body-contains` — Substring that must appear in the preview HTTP response body
+- `--compare-baseline` — Probe baseline (without preview routing headers) and verify HTTP status code parity
+- `--fail-on-status-diff` — Fail verification if baseline and preview HTTP status codes differ when `--compare-baseline` is enabled (default: `true`)
+- `--skip-doctor` — Skip Kubernetes workload health diagnostics (`doctor`)
+- `--github-summary` — Write a Markdown verification scorecard table to `$GITHUB_STEP_SUMMARY` and emit `::error::` workflow annotations on failure
+- `--json` — Output machine-readable JSON verification report
+- `--base-url` — Override the base URL for HTTP verification
+
+**Examples:**
+```bash
+# Verify cluster workload health, /healthz endpoint, baseline status parity, and a 500ms latency SLO
+diverge verify pr-42 --path /healthz --compare-baseline --max-latency 500ms
+
+# Verify in GitHub Actions and publish a step summary scorecard
+diverge verify pr-42 --path /healthz --compare-baseline --github-summary
+```
+
+### `diverge task`
+
+Create and manage spec-driven autonomous AI developer tasks (`AgentTask` CRDs) in isolated Kubernetes sandboxes.
+
+**Subcommands:**
+- `diverge task init [--force]` — Scaffold `.diverge/agent.yaml` in your repository
+- `diverge task create "<objective>"` — Create an `AgentTask` (`--budget`, `--tokens`, `--iterations`, `--base-branch`, `--capabilities`, `--pool`, `--template`, `--dry-run`, `-o yaml|json`)
+- `diverge task list` — List `AgentTask` resources in the namespace
+- `diverge task status <name>` — Show phase (`Pending`, `Provisioning`, `Active`, `Pausing`, `Paused`, `Completed`, `Failed`), iteration progress, token/USD spend, and linked preview URL
+- `diverge task logs <name> [-f]` — Stream live execution logs from the sandbox pod
+- `diverge task guide <name> "<guidance>"` — Send real-time steering instructions (`divergedev.com/guidance`) delivered on the next metering heartbeat
+- `diverge task pause <name>` — Pause an active `AgentTask` (`spec.suspended: true`), revoke its Macaroon token, suspend its sandbox (`operatingMode: Suspended`), and hibernate its linked preview environment
+- `diverge task resume <name> [--budget +10.00] [--tokens 500000]` — Resume a paused `AgentTask` with optional additive budget bumps and mint a fresh Macaroon capability token
+- `diverge task delete <name>` — Delete an `AgentTask` and tear down its sandbox and linked preview
+
+**Examples:**
+```bash
+# Initialize .diverge/agent.yaml
+diverge task init
+
+# Launch an autonomous task with a $5.00 budget
+diverge task create "Fix N+1 query in /api/v1/checkout" --budget 5.00 --base-branch main
+
+# Steer a running task and resume with an additive budget bump
+diverge task guide fix-checkout "Keep v1 response fields backward-compatible"
+diverge task resume fix-checkout --budget +10.00 --tokens 500000
 ```
 

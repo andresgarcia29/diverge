@@ -10,11 +10,17 @@ WebSocket connections (`ws://` and `wss://`) are long-lived connections that sta
 
 ## Configuration
 
-You can enable WebSocket support in your `.diverge.yaml` service configuration:
+You can enable WebSocket support on your `Environment` Custom Resource via `spec.serviceConfig.websocket`:
 
 ```yaml
-services:
-  my-websocket-svc:
+apiVersion: divergedev.com/v1alpha1
+kind: Environment
+metadata:
+  name: chat-pr-42
+spec:
+  serviceConfig:
+    serviceName: my-websocket-svc
+    image: ghcr.io/acme/my-websocket-svc:pr-42
     port: 8080
     websocket:
       enabled: true

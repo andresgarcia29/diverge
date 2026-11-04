@@ -36,3 +36,14 @@ func init() {
 Then, implement the `LinkerdRouter` struct matching the `Router` interface in `internal/routing/linkerd.go`.
 
 Because it registers itself in `init()`, the new `linkerd` router is immediately available to be passed as `--routing-provider=linkerd` when you start the Diverge controller!
+
+## Available Provider Types
+
+- **Routing** (`routing.Router`) — `gateway`, `istio`, `noop`
+- **Deployer** (`deployer.Deployer`) — `direct`, `argocd`, `knative`, `noop`
+- **Database** (`database.DatabaseProvider`) — `schema`, `cnpg`, `neon`, `cockroach`, `webhook`, `noop`
+- **Sandbox** (`sandbox.SandboxProvider`) — `agent-sandbox`, `pod` (`k8s-pod` with automatic fallback), `noop`
+- **Feature Flags** (`features.FeatureFlagProvider`) — `configmap`, `flipt`, `flagsmith`, `unleash`, `noop`
+- **Async & Storage** (`async.Provisioner`) — `kafka`, `temporal`, `redis`/`valkey`, `s3`/`gcs`/`minio`, `webhook`, `CompositeProvisioner`
+- **Notifier** (`notifier.Notifier`) — `github`, `gitlab`, `noop`
+- **Testing** (`testing.TestRunner`) — Integration and visual regression test runners

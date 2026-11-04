@@ -7,7 +7,7 @@ Thank you for contributing to **Diverge**! This guide covers setting up your dev
 ## 1. Development Environment Setup
 
 ### Option A: 1-Click Dev Container / GitHub Codespaces (No Nix Required)
-Open this repository in **GitHub Codespaces** or VS Code with the **Dev Containers** extension (`.devcontainer/devcontainer.json`). It pre-installs Go 1.24, `kubectl`, `helm`, `kind`, `buf`, Node.js 22, and Python 3.12.
+Open this repository in **GitHub Codespaces** or VS Code with the **Dev Containers** extension (`.devcontainer/devcontainer.json`). It pre-installs Go 1.26, `kubectl`, `helm`, `kind`, `buf`, Node.js 22, and Python 3.12.
 
 ### Option B: Nix Flake (Recommended for Local macOS / Linux)
 Diverge provides a reproducible `flake.nix` dev shell that installs all Go, Kubernetes, Protobuf, and linting tools and configures `lefthook` git hooks automatically:
@@ -34,6 +34,7 @@ nix develop -c make test
 | `cmd/server/` | `diverge-server` ConnectRPC API server + embedded Web UI + HTTP tunnel server |
 | `cmd/proxy/` | `diverge-proxy` L7 header-routing reverse proxy |
 | `cmd/activator-proxy/` | `activator-proxy` scale-to-zero wake-up proxy |
+| `cmd/agent-runner/` | `diverge-agent-runner` autonomous coding sandbox entrypoint |
 | `cmd/diverge/` | `diverge` CLI + MCP server (`diverge mcp`) |
 | `internal/` | Controller reconcilers, routing/DB/deployer/sandbox providers, server handlers |
 | `pkg/auth/` | Macaroon capability tokens & Kubernetes Secret token store |

@@ -83,7 +83,10 @@ jobs:
           syft "ghcr.io/divergedev/diverge:${RELEASE_TAG}" -o spdx-json > diverge-sbom.spdx.json
           syft "ghcr.io/divergedev/activator-proxy:${RELEASE_TAG}" -o spdx-json > activator-proxy-sbom.spdx.json
           syft "ghcr.io/divergedev/diverge-cli:${RELEASE_TAG}" -o spdx-json > diverge-cli-sbom.spdx.json
-          syft "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}" -o spdx-json > agent-runner-sbom.spdx.json
+          for arch in amd64 arm64; do
+            DIGEST=$(docker buildx imagetools inspect "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}" --raw | jq -r ".manifests[] | select(.platform.os == \"linux\" and .platform.architecture == \"${arch}\") | .digest")
+            syft --platform "linux/${arch}" "ghcr.io/divergedev/agent-runner@${DIGEST}" -o spdx-json > "agent-runner-${arch}-sbom.spdx.json"
+          done
       - name: Sign container image
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -99,7 +102,10 @@ jobs:
           cosign attach sbom --sbom diverge-sbom.spdx.json "ghcr.io/divergedev/diverge:${RELEASE_TAG}"
           cosign attach sbom --sbom activator-proxy-sbom.spdx.json "ghcr.io/divergedev/activator-proxy:${RELEASE_TAG}"
           cosign attach sbom --sbom diverge-cli-sbom.spdx.json "ghcr.io/divergedev/diverge-cli:${RELEASE_TAG}"
-          cosign attach sbom --sbom agent-runner-sbom.spdx.json "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}"
+          for arch in amd64 arm64; do
+            DIGEST=$(docker buildx imagetools inspect "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}" --raw | jq -r ".manifests[] | select(.platform.os == \"linux\" and .platform.architecture == \"${arch}\") | .digest")
+            cosign attach sbom --sbom "agent-runner-${arch}-sbom.spdx.json" "ghcr.io/divergedev/agent-runner@${DIGEST}"
+          done
       - name: Update floating v1 GitHub Action tag and branch
         if: "!contains(github.ref_name, '-')"
         env:

@@ -529,8 +529,12 @@ func TestVerifyCmd_GitHubStepSummaryAndAnnotations(t *testing.T) {
 func TestVerifyCmd_PreviewGroupMultipleServices(t *testing.T) {
 	t.Run("probes all service endpoints in PreviewGroup", func(t *testing.T) {
 		var frontendHits, ordersHits int
+		var frontendEnv, ordersEnv string
+		var frontendBaggage, ordersBaggage string
 		frontendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			frontendHits++
+			frontendEnv = r.Header.Get("x-diverge-env")
+			frontendBaggage = r.Header.Get("baggage")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("frontend ok"))
 		}))
@@ -538,6 +542,8 @@ func TestVerifyCmd_PreviewGroupMultipleServices(t *testing.T) {
 
 		ordersSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ordersHits++
+			ordersEnv = r.Header.Get("x-diverge-env")
+			ordersBaggage = r.Header.Get("baggage")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("orders ok"))
 		}))
@@ -579,6 +585,10 @@ func TestVerifyCmd_PreviewGroupMultipleServices(t *testing.T) {
 		require.NoError(t, root.Execute())
 		assert.Equal(t, 1, frontendHits)
 		assert.Equal(t, 1, ordersHits)
+		assert.Equal(t, "pr-42", frontendEnv)
+		assert.Equal(t, "pr-42", ordersEnv)
+		assert.Equal(t, "diverge.env=pr-42", frontendBaggage)
+		assert.Equal(t, "diverge.env=pr-42", ordersBaggage)
 
 		var report VerifyReport
 		require.NoError(t, json.Unmarshal(out.Bytes(), &report))
@@ -590,6 +600,73 @@ func TestVerifyCmd_PreviewGroupMultipleServices(t *testing.T) {
 		assert.True(t, report.Checks[1].Passed)
 		assert.Equal(t, "http-status:orders-api:/healthz", report.Checks[2].Name)
 		assert.True(t, report.Checks[2].Passed)
+	})
+
+	t.Run("runs latency-slo, body-contains, and baseline-parity across all PreviewGroup services", func(t *testing.T) {
+		frontendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ready:true"))
+		}))
+		t.Cleanup(frontendSrv.Close)
+
+		ordersSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ready:true"))
+		}))
+		t.Cleanup(ordersSrv.Close)
+
+		pg := &divergeiov1alpha1.PreviewGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pg-pr-88",
+				Namespace: "default",
+			},
+			Spec: divergeiov1alpha1.PreviewGroupSpec{
+				Routing: divergeiov1alpha1.PreviewGroupRouting{
+					Mode:        "header",
+					HeaderKey:   "x-diverge-env",
+					HeaderValue: "pr-88",
+				},
+			},
+			Status: divergeiov1alpha1.PreviewGroupStatus{
+				Phase: divergeiov1alpha1.PreviewGroupPhaseRunning,
+				Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+					{Name: "frontend", EnvironmentName: "pg-pr-88-frontend", Phase: divergeiov1alpha1.PhaseRunning, URL: frontendSrv.URL},
+					{Name: "orders-api", EnvironmentName: "pg-pr-88-orders", Phase: divergeiov1alpha1.PhaseRunning, URL: ordersSrv.URL},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newVerifyTestScheme(t)).
+			WithObjects(pg).
+			Build()
+
+		app := &App{Namespace: "default", Client: fakeClient}
+		root := NewRootCmd(app)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{
+			"verify", "pg-pr-88", "/healthz",
+			"--max-latency", "2s",
+			"--body-contains", "ready:true",
+			"--compare-baseline",
+			"--json",
+		})
+
+		require.NoError(t, root.Execute())
+
+		var report VerifyReport
+		require.NoError(t, json.Unmarshal(out.Bytes(), &report))
+		assert.True(t, report.Passed)
+
+		var checkNames []string
+		for _, chk := range report.Checks {
+			checkNames = append(checkNames, chk.Name)
+		}
+		assert.Contains(t, checkNames, "latency-slo:orders-api:/healthz")
+		assert.Contains(t, checkNames, "body-contains:orders-api:/healthz")
+		assert.Contains(t, checkNames, "baseline-parity:orders-api:/healthz")
 	})
 
 	t.Run("fails when a secondary service in PreviewGroup returns 500", func(t *testing.T) {

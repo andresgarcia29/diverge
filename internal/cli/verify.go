@@ -183,11 +183,26 @@ assertions, response substring checks, and optional baseline parity comparisons.
 				Timeout: opts.timeout,
 			}
 
-			for _, ep := range endpoints {
+			for epIdx, ep := range endpoints {
 				for _, p := range pathsToProbe {
+					absPath := isAbsoluteHTTPURL(p)
+					if epIdx > 0 && absPath {
+						continue
+					}
+					svcName := ep.ServiceName
+					if absPath {
+						svcName = ""
+					}
+
 					targetURL, err := buildCurlTargetURL(ep.BaseURL, p)
 					if err != nil {
-						return err
+						report.Checks = append(report.Checks, VerifyCheckResult{
+							Name:    formatVerifyCheckName("http-status", svcName, p),
+							Passed:  false,
+							Status:  "ERROR",
+							Message: err.Error(),
+						})
+						continue
 					}
 					if report.TargetURL == "" {
 						report.TargetURL = targetURL
@@ -196,7 +211,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 					prevResp, err := executeCurlRequest(cmd, httpClient, method, targetURL, opts.data, opts.headers, headerKey, headerValue)
 					if err != nil {
 						report.Checks = append(report.Checks, VerifyCheckResult{
-							Name:    formatVerifyCheckName("http-status", ep.ServiceName, p),
+							Name:    formatVerifyCheckName("http-status", svcName, p),
 							Passed:  false,
 							Status:  "ERROR",
 							Message: err.Error(),
@@ -215,7 +230,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 					}
 
 					report.Checks = append(report.Checks, VerifyCheckResult{
-						Name:       formatVerifyCheckName("http-status", ep.ServiceName, p),
+						Name:       formatVerifyCheckName("http-status", svcName, p),
 						Passed:     statusPassed,
 						Status:     fmt.Sprintf("HTTP %d", prevResp.StatusCode),
 						DurationMs: prevResp.Duration.Milliseconds(),
@@ -224,7 +239,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 
 					if opts.maxLatency > 0 {
 						report.Checks = append(report.Checks, VerifyCheckResult{
-							Name:       formatVerifyCheckName("latency-slo", ep.ServiceName, p),
+							Name:       formatVerifyCheckName("latency-slo", svcName, p),
 							Passed:     prevResp.Duration <= opts.maxLatency,
 							Status:     prevResp.Duration.Round(time.Millisecond).String(),
 							DurationMs: prevResp.Duration.Milliseconds(),
@@ -241,7 +256,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 							bodyMsg = fmt.Sprintf("response body missing %q", opts.bodyContains)
 						}
 						report.Checks = append(report.Checks, VerifyCheckResult{
-							Name:    formatVerifyCheckName("body-contains", ep.ServiceName, p),
+							Name:    formatVerifyCheckName("body-contains", svcName, p),
 							Passed:  matched,
 							Status:  bodyStatus,
 							Message: bodyMsg,
@@ -249,10 +264,19 @@ assertions, response substring checks, and optional baseline parity comparisons.
 					}
 
 					if opts.compareBaseline {
+						if ep.SubdomainRouted && !absPath {
+							report.Checks = append(report.Checks, VerifyCheckResult{
+								Name:    formatVerifyCheckName("baseline-parity", svcName, p),
+								Passed:  !opts.failOnStatusDiff,
+								Status:  "UNAVAILABLE",
+								Message: fmt.Sprintf("baseline parity unavailable for subdomain-routed target %s (pass --base-url or disable --compare-baseline)", targetURL),
+							})
+							continue
+						}
 						baseResp, baseErr := executeCurlRequest(cmd, httpClient, method, targetURL, opts.data, opts.headers, "", "")
 						if baseErr != nil {
 							report.Checks = append(report.Checks, VerifyCheckResult{
-								Name:    formatVerifyCheckName("baseline-parity", ep.ServiceName, p),
+								Name:    formatVerifyCheckName("baseline-parity", svcName, p),
 								Passed:  false,
 								Status:  "ERROR",
 								Message: fmt.Sprintf("baseline request failed: %v", baseErr),
@@ -265,7 +289,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 								parityStatus = "DIFF"
 							}
 							report.Checks = append(report.Checks, VerifyCheckResult{
-								Name:       formatVerifyCheckName("baseline-parity", ep.ServiceName, p),
+								Name:       formatVerifyCheckName("baseline-parity", svcName, p),
 								Passed:     passed,
 								Status:     parityStatus,
 								DurationMs: baseResp.Duration.Milliseconds(),
@@ -349,11 +373,19 @@ assertions, response substring checks, and optional baseline parity comparisons.
 	return cmd
 }
 
+// verifyEndpoint represents a resolved service endpoint for HTTP verification.
 type verifyEndpoint struct {
-	ServiceName string
-	BaseURL     string
+	ServiceName     string
+	BaseURL         string
+	SubdomainRouted bool
 }
 
+// isAbsoluteHTTPURL reports whether s starts with an http:// or https:// scheme.
+func isAbsoluteHTTPURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// formatVerifyCheckName builds a verification check name, optionally scoped by service name.
 func formatVerifyCheckName(prefix, serviceName, path string) string {
 	if serviceName != "" {
 		return fmt.Sprintf("%s:%s:%s", prefix, serviceName, path)
@@ -361,13 +393,15 @@ func formatVerifyCheckName(prefix, serviceName, path string) string {
 	return fmt.Sprintf("%s:%s", prefix, path)
 }
 
+// resolveVerifyEndpoints resolves one or more HTTP base URLs and routing headers for an Environment or PreviewGroup.
 func resolveVerifyEndpoints(cmd *cobra.Command, app *App, envName, firstPath string, opts *curlOptions) ([]verifyEndpoint, string, string, error) {
 	baseURL, headerKey, headerValue, err := resolveCurlRouting(cmd, app, envName, firstPath, opts)
 	if err != nil {
 		return nil, "", "", err
 	}
 
-	isFullURL := strings.HasPrefix(firstPath, "http://") || strings.HasPrefix(firstPath, "https://")
+	isFullURL := isAbsoluteHTTPURL(firstPath)
+	subdomainRouted := false
 	if strings.TrimSpace(opts.baseURL) == "" && !isFullURL && app != nil {
 		if c, _, err := app.KubeClient(); err == nil && c != nil {
 			ns := app.Namespace
@@ -375,20 +409,27 @@ func resolveVerifyEndpoints(cmd *cobra.Command, app *App, envName, firstPath str
 				ns = "default"
 			}
 			var env divergeiov1alpha1.Environment
-			if getErr := c.Get(cmd.Context(), client.ObjectKey{Name: envName, Namespace: ns}, &env); getErr != nil {
+			if getErr := c.Get(cmd.Context(), client.ObjectKey{Name: envName, Namespace: ns}, &env); getErr == nil {
+				subdomainRouted = strings.EqualFold(env.Spec.Routing.Mode, "subdomain")
+			} else {
 				var pg divergeiov1alpha1.PreviewGroup
 				pgErr := c.Get(cmd.Context(), client.ObjectKey{Name: envName, Namespace: ns}, &pg)
 				if pgErr != nil {
 					pgErr = c.Get(cmd.Context(), client.ObjectKey{Name: envName}, &pg)
 				}
-				if pgErr == nil && pg.Spec.Routing.ExternalURL == "" {
+				if pgErr != nil {
+					return nil, "", "", fmt.Errorf("failed to get previewgroup %s: %w", envName, pgErr)
+				}
+				subdomainRouted = strings.EqualFold(pg.Spec.Routing.Mode, "subdomain")
+				if pg.Spec.Routing.ExternalURL == "" {
 					var svcEndpoints []verifyEndpoint
 					for _, svc := range pg.Status.Services {
 						u := strings.TrimSpace(svc.URL)
 						if u != "" {
 							svcEndpoints = append(svcEndpoints, verifyEndpoint{
-								ServiceName: svc.Name,
-								BaseURL:     u,
+								ServiceName:     svc.Name,
+								BaseURL:         u,
+								SubdomainRouted: subdomainRouted,
 							})
 						}
 					}
@@ -400,19 +441,22 @@ func resolveVerifyEndpoints(cmd *cobra.Command, app *App, envName, firstPath str
 		}
 	}
 
-	return []verifyEndpoint{{ServiceName: "", BaseURL: baseURL}}, headerKey, headerValue, nil
+	return []verifyEndpoint{{ServiceName: "", BaseURL: baseURL, SubdomainRouted: subdomainRouted}}, headerKey, headerValue, nil
 }
 
+// escapeGHAData escapes special characters in GitHub Actions workflow command data.
 func escapeGHAData(s string) string {
 	r := strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A")
 	return r.Replace(s)
 }
 
+// escapeGHAProperty escapes special characters in GitHub Actions workflow command properties.
 func escapeGHAProperty(s string) string {
 	r := strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A", ":", "%3A", ",", "%2C")
 	return r.Replace(s)
 }
 
+// renderVerifyTable renders a tabular verification scorecard to out.
 func renderVerifyTable(out io.Writer, report *VerifyReport, passedCount, failedCount int) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "CHECK\tSTATUS\tRESULT\tDETAILS")

@@ -168,6 +168,20 @@ func TestPodSandboxProvider_ProvisionAndSpec(t *testing.T) {
 	assert.Equal(t, int32(0400), *pod.Spec.Volumes[2].Secret.DefaultMode)
 	require.NotNil(t, pod.Spec.Volumes[2].Secret.Optional)
 	assert.True(t, *pod.Spec.Volumes[2].Secret.Optional)
+
+	// Verify DraftPR=false propagates DIVERGE_DRAFT_PR="false"
+	taskNoDraft := task.DeepCopy()
+	taskNoDraft.Name = "fix-checkout-ready"
+	taskNoDraft.Spec.DraftPR = false
+	_, err = p.Provision(ctx, taskNoDraft)
+	require.NoError(t, err)
+	podNoDraft := &corev1.Pod{}
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "staging", Name: "sb-pod-fix-checkout-ready"}, podNoDraft))
+	envNoDraft := make(map[string]string, len(podNoDraft.Spec.Containers[0].Env))
+	for _, e := range podNoDraft.Spec.Containers[0].Env {
+		envNoDraft[e.Name] = e.Value
+	}
+	assert.Equal(t, "false", envNoDraft["DIVERGE_DRAFT_PR"])
 }
 
 func TestPodSandboxProvider_StatusTransitionsAndTeardown(t *testing.T) {

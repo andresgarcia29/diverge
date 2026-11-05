@@ -205,6 +205,15 @@ func TestBuildSandboxClaimSpec(t *testing.T) {
 	labelsLong := metaLong["labels"].(map[string]interface{})
 	labelVal := labelsLong["divergedev.com/agent-task"].(string)
 	assert.Equal(t, 63, len(labelVal))
+
+	// Verify DraftPR=false sets DIVERGE_DRAFT_PR="false"
+	longEnvList := tmplLong["spec"].(map[string]interface{})["containers"].([]interface{})[0].(map[string]interface{})["env"].([]interface{})
+	longEnvMap := make(map[string]string, len(longEnvList))
+	for _, e := range longEnvList {
+		em := e.(map[string]interface{})
+		longEnvMap[em["name"].(string)] = em["value"].(string)
+	}
+	assert.Equal(t, "false", longEnvMap["DIVERGE_DRAFT_PR"])
 }
 
 func TestAgentSandboxProvider_SuspendAndResume(t *testing.T) {

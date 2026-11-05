@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,6 +56,8 @@ type Config struct {
 	WorkingBranch       string
 	DraftPR             bool
 	SCMToken            string
+	GitHubToken         string
+	GitLabToken         string
 	GitHubAPIURL        string
 	GitLabAPIURL        string
 	BudgetUSD           string
@@ -120,12 +124,8 @@ func LoadConfigFromEnv(getenv func(string) string) (*Config, error) {
 	}
 
 	scmToken := strings.TrimSpace(getenv("DIVERGE_SCM_TOKEN"))
-	if scmToken == "" {
-		scmToken = strings.TrimSpace(getenv("GITHUB_TOKEN"))
-	}
-	if scmToken == "" {
-		scmToken = strings.TrimSpace(getenv("GITLAB_TOKEN"))
-	}
+	githubToken := strings.TrimSpace(getenv("GITHUB_TOKEN"))
+	gitlabToken := strings.TrimSpace(getenv("GITLAB_TOKEN"))
 
 	githubAPIURL := strings.TrimSpace(getenv("DIVERGE_GITHUB_API_URL"))
 	if githubAPIURL == "" {
@@ -211,6 +211,8 @@ func LoadConfigFromEnv(getenv func(string) string) (*Config, error) {
 		WorkingBranch:       workingBranch,
 		DraftPR:             draftPR,
 		SCMToken:            scmToken,
+		GitHubToken:         githubToken,
+		GitLabToken:         gitlabToken,
 		GitHubAPIURL:        githubAPIURL,
 		GitLabAPIURL:        gitlabAPIURL,
 		BudgetUSD:           strings.TrimSpace(getenv("DIVERGE_BUDGET_USD")),
@@ -312,6 +314,7 @@ func NewRunner(cfg *Config) *Runner {
 	}
 }
 
+// executor returns the configured CommandExecutor or falls back to OSCommandExecutor.
 func (r *Runner) executor() CommandExecutor {
 	if r.Exec != nil {
 		return r.Exec
@@ -319,6 +322,7 @@ func (r *Runner) executor() CommandExecutor {
 	return OSCommandExecutor{}
 }
 
+// httpClient returns the configured HTTP client or falls back to a 30-second timeout client.
 func (r *Runner) httpClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient
@@ -326,6 +330,7 @@ func (r *Runner) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
+// logf formats and writes a line to the runner's logger when configured.
 func (r *Runner) logf(format string, args ...any) {
 	w := r.Logger
 	if w == nil {
@@ -385,7 +390,8 @@ func (r *Runner) ReportPullRequest(ctx context.Context, iter int, token, prURL s
 		if err != nil {
 			return nil, err
 		}
-		reqID = fmt.Sprintf("%s-%s-pr", r.Config.TaskName, runID)
+		sum := sha256.Sum256([]byte(strings.TrimSpace(prURL)))
+		reqID = fmt.Sprintf("%s-%s-pr-%s", r.Config.TaskName, runID, hex.EncodeToString(sum[:4]))
 	}
 	model := ""
 	if r.Config != nil {
@@ -399,6 +405,7 @@ func (r *Runner) ReportPullRequest(ctx context.Context, iter int, token, prURL s
 	})
 }
 
+// ensureRunID returns the active run ID or generates a cryptographically random 16-byte hex nonce.
 func (r *Runner) ensureRunID() (string, error) {
 	if r.runID != "" {
 		return r.runID, nil
@@ -415,6 +422,7 @@ func (r *Runner) ensureRunID() (string, error) {
 	return r.runID, nil
 }
 
+// postMeterRequest serializes and sends a MeterRequest to the Diverge metering endpoint.
 func (r *Runner) postMeterRequest(ctx context.Context, token string, payload MeterRequest) (*MeterResponse, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -454,6 +462,7 @@ func (r *Runner) postMeterRequest(ctx context.Context, token string, payload Met
 	return &meterResp, nil
 }
 
+// firstLine extracts and trims the first line of s, capped at 120 bytes.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
@@ -465,6 +474,7 @@ func firstLine(s string) string {
 	return s
 }
 
+// parseRepositoryCoordinates extracts the SCM hostname and owner/repository path from an HTTPS or SSH Git URL.
 func parseRepositoryCoordinates(rawURL string) (host string, repoPath string, err error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
@@ -487,7 +497,7 @@ func parseRepositoryCoordinates(rawURL string) (host string, repoPath string, er
 	}
 
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Hostname() == "" {
 		return "", "", fmt.Errorf("invalid repository URL %q", rawURL)
 	}
 	pathPart := strings.Trim(parsed.Path, "/")
@@ -498,20 +508,89 @@ func parseRepositoryCoordinates(rawURL string) (host string, repoPath string, er
 	return parsed.Hostname(), pathPart, nil
 }
 
+// isGitLabHost determines whether a repository hostname should route to the GitLab API.
+// github.com always routes to GitHub even when custom GitLab API environment variables are present.
+func (r *Runner) isGitLabHost(host string) bool {
+	if strings.EqualFold(host, "github.com") {
+		return false
+	}
+	if strings.Contains(strings.ToLower(host), "gitlab") {
+		return true
+	}
+	if r.Config == nil {
+		return false
+	}
+	gitlabAPI := strings.TrimRight(strings.TrimSpace(r.Config.GitLabAPIURL), "/")
+	return gitlabAPI != "" && gitlabAPI != DefaultGitLabAPIURL
+}
+
+// resolveProviderSCMToken returns the SCM token matching the target provider (GitLab vs GitHub),
+// preferring the explicit DIVERGE_SCM_TOKEN when set.
+func (r *Runner) resolveProviderSCMToken(isGitLab bool) string {
+	if r.Config == nil {
+		return ""
+	}
+	if scm := strings.TrimSpace(r.Config.SCMToken); scm != "" {
+		return scm
+	}
+	if isGitLab {
+		return strings.TrimSpace(r.Config.GitLabToken)
+	}
+	return strings.TrimSpace(r.Config.GitHubToken)
+}
+
+// gitHTTPAuthEnv builds GIT_CONFIG_* environment variables for authenticating HTTPS git push operations
+// using the configured provider SCM token without exposing credentials in URLs or command arguments.
+func (r *Runner) gitHTTPAuthEnv() []string {
+	if r.Config == nil {
+		return nil
+	}
+	repoURL := strings.TrimSpace(r.Config.RepoURL)
+	if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "http://") {
+		return nil
+	}
+	host, _, err := parseRepositoryCoordinates(repoURL)
+	if err != nil {
+		return nil
+	}
+	isGitLab := r.isGitLabHost(host)
+	scmToken := r.resolveProviderSCMToken(isGitLab)
+	if scmToken == "" {
+		return nil
+	}
+	username := "x-access-token"
+	if isGitLab {
+		username = "oauth2"
+	}
+	basic := base64.StdEncoding.EncodeToString([]byte(username + ":" + scmToken))
+	return []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic " + basic,
+	}
+}
+
 // CreatePullRequest opens a Pull Request (GitHub) or Merge Request (GitLab) for WorkingBranch -> BaseBranch
-// when SCMToken is configured. If SCMToken is empty, it returns ("", nil).
+// when an SCM token is configured for the target provider. If no token is configured, it returns ("", nil).
 func (r *Runner) CreatePullRequest(ctx context.Context) (string, error) {
 	if r.Config == nil {
 		return "", errors.New("runner config is nil")
 	}
-	scmToken := strings.TrimSpace(r.Config.SCMToken)
-	if scmToken == "" {
-		return "", nil
-	}
 
 	host, repoPath, err := parseRepositoryCoordinates(r.Config.RepoURL)
 	if err != nil {
+		// If no SCM token is configured at all, skip PR creation without failing.
+		if strings.TrimSpace(r.Config.SCMToken) == "" && strings.TrimSpace(r.Config.GitHubToken) == "" && strings.TrimSpace(r.Config.GitLabToken) == "" {
+			return "", nil
+		}
 		return "", err
+	}
+
+	isGitLab := r.isGitLabHost(host)
+	scmToken := r.resolveProviderSCMToken(isGitLab)
+	if scmToken == "" {
+		return "", nil
 	}
 
 	baseBranch := strings.TrimSpace(r.Config.BaseBranch)
@@ -526,18 +605,29 @@ func (r *Runner) CreatePullRequest(ctx context.Context) (string, error) {
 		strings.TrimSpace(r.Config.Objective),
 	)
 
-	isGitLab := strings.Contains(strings.ToLower(host), "gitlab") ||
-		(strings.TrimSpace(r.Config.GitLabAPIURL) != "" && strings.TrimSpace(r.Config.GitLabAPIURL) != DefaultGitLabAPIURL)
-
 	if isGitLab {
 		return r.createGitLabMergeRequest(ctx, scmToken, repoPath, baseBranch, title, body)
+	}
+	if !strings.EqualFold(host, "github.com") {
+		apiBase := strings.TrimRight(strings.TrimSpace(r.Config.GitHubAPIURL), "/")
+		if apiBase == "" || apiBase == DefaultGitHubAPIURL {
+			return "", fmt.Errorf("repository host %q requires an explicit GitHub API URL; refusing to send SCM token to %s", host, DefaultGitHubAPIURL)
+		}
 	}
 	return r.createGitHubPullRequest(ctx, scmToken, repoPath, baseBranch, title, body)
 }
 
+// createGitHubPullRequest creates a GitHub Pull Request or looks up an existing open PR on HTTP 422.
 func (r *Runner) createGitHubPullRequest(ctx context.Context, scmToken, repoPath, baseBranch, title, body string) (string, error) {
 	apiBase := strings.TrimRight(strings.TrimSpace(r.Config.GitHubAPIURL), "/")
-	if apiBase == "" {
+	if apiBase == "" || apiBase == DefaultGitHubAPIURL {
+		host, _, err := parseRepositoryCoordinates(r.Config.RepoURL)
+		if err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(host, "github.com") {
+			return "", fmt.Errorf("GitHub API URL must be set explicitly for host %q", host)
+		}
 		apiBase = DefaultGitHubAPIURL
 	}
 
@@ -607,15 +697,26 @@ func (r *Runner) createGitHubPullRequest(ctx context.Context, scmToken, repoPath
 	return "", fmt.Errorf("GitHub PR creation returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errData)))
 }
 
+// createGitLabMergeRequest creates a GitLab Merge Request or looks up an existing opened MR on HTTP 409/422.
 func (r *Runner) createGitLabMergeRequest(ctx context.Context, scmToken, repoPath, baseBranch, title, body string) (string, error) {
 	apiBase := strings.TrimRight(strings.TrimSpace(r.Config.GitLabAPIURL), "/")
-	if apiBase == "" {
+	if apiBase == "" || apiBase == DefaultGitLabAPIURL {
+		host, _, err := parseRepositoryCoordinates(r.Config.RepoURL)
+		if err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(host, "gitlab.com") {
+			return "", fmt.Errorf("GitLab API URL must be set explicitly for host %q", host)
+		}
 		apiBase = DefaultGitLabAPIURL
 	}
 
 	mrTitle := title
 	if r.Config.DraftPR && !strings.HasPrefix(strings.ToLower(mrTitle), "draft:") {
 		mrTitle = "Draft: " + mrTitle
+	}
+	if runes := []rune(mrTitle); len(runes) > 255 {
+		mrTitle = string(runes[:255])
 	}
 
 	payload := map[string]any{
@@ -652,6 +753,30 @@ func (r *Runner) createGitLabMergeRequest(ctx context.Context, scmToken, repoPat
 			return "", fmt.Errorf("decode GitLab MR response: %w", err)
 		}
 		return strings.TrimSpace(mrResp.WebURL), nil
+	}
+
+	// If an open MR already exists for this source/target branch (409 Conflict or 422 Unprocessable Entity), look it up idempotently.
+	if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity {
+		q := url.Values{}
+		q.Set("source_branch", r.Config.WorkingBranch)
+		q.Set("target_branch", baseBranch)
+		q.Set("state", "opened")
+		listReq, listErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
+		if listErr == nil {
+			listReq.Header.Set("PRIVATE-TOKEN", scmToken)
+			listReq.Header.Set("Authorization", "Bearer "+scmToken)
+			if listResp, doErr := r.httpClient().Do(listReq); doErr == nil {
+				defer func() { _ = listResp.Body.Close() }()
+				if listResp.StatusCode == http.StatusOK {
+					var existing []struct {
+						WebURL string `json:"web_url"`
+					}
+					if json.NewDecoder(listResp.Body).Decode(&existing) == nil && len(existing) > 0 && strings.TrimSpace(existing[0].WebURL) != "" {
+						return strings.TrimSpace(existing[0].WebURL), nil
+					}
+				}
+			}
+		}
 	}
 
 	errData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -837,7 +962,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 			if _, err := exec.Run(ctx, r.Config.WorkspaceDir, nil, "git", "commit", "-m", commitMsg); err != nil {
 				return failedResult(), fmt.Errorf("git commit: %w", err)
 			}
-			if _, err := exec.Run(ctx, r.Config.WorkspaceDir, nil, "git", "push", "-u", "origin", r.Config.WorkingBranch); err != nil {
+			if _, err := exec.Run(ctx, r.Config.WorkspaceDir, r.gitHTTPAuthEnv(), "git", "push", "-u", "origin", r.Config.WorkingBranch); err != nil {
 				return failedResult(), fmt.Errorf("git push: %w", err)
 			}
 
@@ -847,7 +972,22 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 			} else if createdPRURL != "" {
 				prURL = createdPRURL
 				r.logf("created pull request: %s", prURL)
-				if _, reportErr := r.ReportPullRequest(ctx, iter, token, prURL); reportErr != nil {
+				reportToken := token
+				if latestToken, tokErr := r.ResolveToken(); tokErr == nil && latestToken != "" {
+					reportToken = latestToken
+				}
+				var reportErr error
+				for attempt := 1; attempt <= 3; attempt++ {
+					if attempt > 1 {
+						if latestToken, tokErr := r.ResolveToken(); tokErr == nil && latestToken != "" {
+							reportToken = latestToken
+						}
+					}
+					if _, reportErr = r.ReportPullRequest(ctx, iter, reportToken, prURL); reportErr == nil {
+						break
+					}
+				}
+				if reportErr != nil {
 					r.logf("warning: failed to report pull request URL to metering server: %v", reportErr)
 				}
 			}

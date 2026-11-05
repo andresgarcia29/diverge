@@ -171,7 +171,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	trimmedPRURL := strings.TrimSpace(req.PRURL)
 	if trimmedPRURL != "" {
 		parsedPRURL, parseErr := url.Parse(trimmedPRURL)
-		if parseErr != nil || (parsedPRURL.Scheme != "http" && parsedPRURL.Scheme != "https") || parsedPRURL.Host == "" {
+		if parseErr != nil || (parsedPRURL.Scheme != "http" && parsedPRURL.Scheme != "https") || parsedPRURL.Hostname() == "" {
 			writeMeterJSON(w, http.StatusBadRequest, LLMMeterResponse{
 				Allowed: false,
 				Reason:  "invalid prUrl: must be a valid http or https URL",
@@ -303,6 +303,11 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				task.Status.Iteration = req.Iteration
 			}
 
+			if trimmedPRURL != "" {
+				task.Status.PRURL = trimmedPRURL
+				prURL = trimmedPRURL
+			}
+
 			if req.RequestID != "" {
 				task.Status.LastMeterRequestIDs = append(task.Status.LastMeterRequestIDs, req.RequestID)
 				if len(task.Status.LastMeterRequestIDs) > 32 {
@@ -312,10 +317,6 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		curIteration = task.Status.Iteration
-		if trimmedPRURL != "" {
-			task.Status.PRURL = trimmedPRURL
-			prURL = trimmedPRURL
-		}
 
 		budgetExceeded = false
 		hasSpecUSD := false

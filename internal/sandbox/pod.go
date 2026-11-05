@@ -105,18 +105,6 @@ func (p *PodSandboxProvider) Provision(ctx context.Context, task *v1alpha1.Agent
 	if guidance := strings.TrimSpace(task.Annotations["divergedev.com/guidance"]); guidance != "" {
 		containerEnv = append(containerEnv, corev1.EnvVar{Name: "DIVERGE_GUIDANCE", Value: guidance})
 	}
-	if scmSecret := strings.TrimSpace(task.Annotations["divergedev.com/scm-secret"]); scmSecret != "" {
-		containerEnv = append(containerEnv, corev1.EnvVar{
-			Name: "DIVERGE_SCM_TOKEN",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: scmSecret},
-					Key:                  "token",
-					Optional:             ptr(true),
-				},
-			},
-		})
-	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

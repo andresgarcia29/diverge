@@ -81,43 +81,78 @@ func (d *Diagnoser) Diagnose(ctx context.Context, namespace, envName string) (*R
 		Suggestions:     make([]string, 0),
 	}
 
-	// 1. Inspect Environment CRs if client is available
+	// 1. Inspect Environment CRs (or PreviewGroup child Environments) if client is available
 	if d.client != nil {
+		targetEnvs := make([]client.ObjectKey, 0, 1)
+		seenTargetEnvs := make(map[string]struct{})
+		addTargetEnv := func(ns, name string) {
+			if name == "" {
+				return
+			}
+			if ns == "" {
+				ns = namespace
+			}
+			k := ns + "/" + name
+			if _, ok := seenTargetEnvs[k]; !ok {
+				seenTargetEnvs[k] = struct{}{}
+				targetEnvs = append(targetEnvs, client.ObjectKey{Namespace: ns, Name: name})
+			}
+		}
+
 		if envName != "" {
+			addTargetEnv(namespace, envName)
 			var env divergeiov1alpha1.Environment
 			key := client.ObjectKey{Namespace: namespace, Name: envName}
 			if err := d.client.Get(ctx, key, &env); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return nil, fmt.Errorf("failed to get environment %s: %w", envName, err)
 				}
+				if err := d.inspectPreviewGroupChildren(ctx, namespace, envName, report, addTargetEnv); err != nil {
+					return nil, err
+				}
 			} else {
 				d.checkEnvironment(&env, report)
 			}
 		}
 
-		// 2. Inspect Pods in the namespace
-		var podList corev1.PodList
-		listOpts := []client.ListOption{client.InNamespace(namespace)}
-		if envName != "" {
-			listOpts = append(listOpts, client.MatchingLabels{
-				"divergedev.com/environment": envName,
-			})
-		}
-
-		if err := d.client.List(ctx, &podList, listOpts...); err != nil {
-			return nil, fmt.Errorf("failed to list pods in namespace %s: %w", namespace, err)
-		}
-		if envName != "" && len(podList.Items) == 0 {
-			legacyOpts := []client.ListOption{
-				client.InNamespace(namespace),
-				client.MatchingLabels{"diverge.io/environment": envName},
-			}
-			if err := d.client.List(ctx, &podList, legacyOpts...); err != nil {
+		// 2. Inspect Pods in the target namespace(s)
+		if envName == "" {
+			var podList corev1.PodList
+			if err := d.client.List(ctx, &podList, client.InNamespace(namespace)); err != nil {
 				return nil, fmt.Errorf("failed to list pods in namespace %s: %w", namespace, err)
 			}
-		}
-		for i := range podList.Items {
-			d.checkPod(&podList.Items[i], report)
+			for i := range podList.Items {
+				d.checkPod(&podList.Items[i], report)
+			}
+		} else {
+			seenPods := make(map[string]struct{})
+			for _, target := range targetEnvs {
+				var podList corev1.PodList
+				listOpts := []client.ListOption{
+					client.InNamespace(target.Namespace),
+					client.MatchingLabels{"divergedev.com/environment": target.Name},
+				}
+				if err := d.client.List(ctx, &podList, listOpts...); err != nil {
+					return nil, fmt.Errorf("failed to list pods in namespace %s: %w", target.Namespace, err)
+				}
+				if len(podList.Items) == 0 {
+					legacyOpts := []client.ListOption{
+						client.InNamespace(target.Namespace),
+						client.MatchingLabels{"diverge.io/environment": target.Name},
+					}
+					if err := d.client.List(ctx, &podList, legacyOpts...); err != nil {
+						return nil, fmt.Errorf("failed to list pods in namespace %s: %w", target.Namespace, err)
+					}
+				}
+				for i := range podList.Items {
+					podKey := podList.Items[i].Namespace + "/" + podList.Items[i].Name
+					if _, exists := seenPods[podKey]; exists {
+						continue
+					}
+					seenPods[podKey] = struct{}{}
+					d.checkPod(&podList.Items[i], report)
+				}
+			}
 		}
 
 		// 3. Inspect AgentTasks in the namespace (if registered in scheme)
@@ -128,8 +163,13 @@ func (d *Diagnoser) Diagnose(ctx context.Context, namespace, envName string) (*R
 			}
 		} else {
 			for i := range taskList.Items {
-				if envName != "" && taskList.Items[i].Annotations["divergedev.com/preview-environment"] != envName {
-					continue
+				if envName != "" {
+					linkedEnv := taskList.Items[i].Annotations["divergedev.com/preview-environment"]
+					if linkedEnv != envName {
+						if _, ok := seenTargetEnvs[namespace+"/"+linkedEnv]; !ok {
+							continue
+						}
+					}
 				}
 				d.checkAgentTask(&taskList.Items[i], report)
 			}
@@ -141,6 +181,92 @@ func (d *Diagnoser) Diagnose(ctx context.Context, namespace, envName string) (*R
 	}
 
 	return report, nil
+}
+
+func (d *Diagnoser) inspectPreviewGroupChildren(
+	ctx context.Context,
+	namespace, pgName string,
+	report *Report,
+	addTargetEnv func(ns, name string),
+) error {
+	checkedEnvs := make(map[string]struct{})
+	checkChildEnv := func(env *divergeiov1alpha1.Environment) {
+		ns := env.Namespace
+		if ns == "" {
+			ns = namespace
+		}
+		k := ns + "/" + env.Name
+		if _, ok := checkedEnvs[k]; ok {
+			return
+		}
+		checkedEnvs[k] = struct{}{}
+		addTargetEnv(ns, env.Name)
+		d.checkEnvironment(env, report)
+	}
+
+	var pg divergeiov1alpha1.PreviewGroup
+	pgErr := d.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pgName}, &pg)
+	if pgErr != nil && apierrors.IsNotFound(pgErr) {
+		pgErr = d.client.Get(ctx, client.ObjectKey{Name: pgName}, &pg)
+	}
+	if pgErr != nil && !apierrors.IsNotFound(pgErr) && !meta.IsNoMatchError(pgErr) && !runtime.IsNotRegisteredError(pgErr) {
+		return fmt.Errorf("failed to get preview group %s: %w", pgName, pgErr)
+	}
+	if pgErr == nil {
+		for _, svc := range pg.Status.Services {
+			svcNS := svc.Namespace
+			if svcNS == "" {
+				svcNS = namespace
+			}
+			if svc.EnvironmentName != "" {
+				addTargetEnv(svcNS, svc.EnvironmentName)
+				var childEnv divergeiov1alpha1.Environment
+				err := d.client.Get(ctx, client.ObjectKey{Namespace: svcNS, Name: svc.EnvironmentName}, &childEnv)
+				if err == nil {
+					checkChildEnv(&childEnv)
+					continue
+				}
+				if !apierrors.IsNotFound(err) {
+					return fmt.Errorf("failed to get child environment %s/%s: %w", svcNS, svc.EnvironmentName, err)
+				}
+			}
+			if svc.Phase == divergeiov1alpha1.PhaseFailed {
+				report.Issues = append(report.Issues, Issue{
+					Code:        CodeEnvironmentFailed,
+					Severity:    SeverityCritical,
+					Component:   fmt.Sprintf("PreviewGroup/%s/%s", pg.Name, svc.Name),
+					Summary:     fmt.Sprintf("PreviewGroup service %s phase is Failed", svc.Name),
+					Details:     svc.Message,
+					Remediation: "Check child Environment status, container logs, and post-deploy hook jobs.",
+					DocsURL:     DocsBaseURL + "#div-101-environment-failed",
+				})
+			}
+		}
+	}
+
+	pgLabels := []string{
+		"divergedev.com/previewgroup",
+		"divergedev.com/preview-group",
+		"diverge.io/previewgroup",
+		"diverge.io/preview-group",
+	}
+	for _, labelKey := range pgLabels {
+		var envList divergeiov1alpha1.EnvironmentList
+		err := d.client.List(
+			ctx,
+			&envList,
+			client.InNamespace(namespace),
+			client.MatchingLabels{labelKey: pgName},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to list preview group environments in namespace %s: %w", namespace, err)
+		}
+		for i := range envList.Items {
+			checkChildEnv(&envList.Items[i])
+		}
+	}
+
+	return nil
 }
 
 func (d *Diagnoser) checkEnvironment(env *divergeiov1alpha1.Environment, report *Report) {

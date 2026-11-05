@@ -17,7 +17,7 @@ Open-source Kubernetes environment-as-a-service and autonomous AI agent sandbox 
 ### Get Started
 
 ```bash
-curl -fsSL https://divergedev.com/install.sh | sh
+curl -fsSL https://divergedev.com/install.sh -o install.sh && sh install.sh
 ```
 
 Documentation: [https://divergedev.com](https://divergedev.com)
@@ -217,7 +217,7 @@ The `diverge` CLI helps you manage environments efficiently:
 Install via shell script:
 
 ```bash
-curl -fsSL https://divergedev.com/install.sh | sh
+curl -fsSL https://divergedev.com/install.sh -o install.sh && sh install.sh
 ```
 
 Or download and verify first:

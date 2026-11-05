@@ -57,7 +57,17 @@ helm upgrade --install diverge charts/diverge \
 ```
 
 > [!TIP]
-> **Built-in Kubernetes `pod` Sandbox Provider & Automatic Fallback**:
+> **Built-in Kubernetes `pod` Sandbox Provider & `SandboxTemplate` Setup**:
+> When using `provider: agent-sandbox` on clusters with the `extensions.agents.x-k8s.io` CRD controller installed, omitted `spec.sandbox.template` values default to `sandboxTemplateRef.name: default` in the task's namespace. Ensure a `default` `SandboxTemplate` exists in the target namespace (or set `spec.sandbox.template` to your template name):
+> ```yaml
+> apiVersion: extensions.agents.x-k8s.io/v1alpha1
+> kind: SandboxTemplate
+> metadata:
+>   name: default
+>   namespace: default
+> spec:
+>   image: ghcr.io/divergedev/agent-runner:latest
+> ```
 > On clusters without the external `extensions.agents.x-k8s.io` (`agent-sandbox`) CRD controller installed, you can set `--set sandbox.provider=pod` (or `spec.sandbox.provider: pod`) to provision hardened Kubernetes `Pod`s (`sb-pod-<task>`) with dropped capabilities, `runAsNonRoot: true`, `RuntimeDefault` seccomp, optional `divergedev.com/runtime-class` (`gvisor` / `kata`), `10Gi` workspace `emptyDir`, and mounted Macaroon tokens. Even when `provider: agent-sandbox` is selected, Diverge automatically falls back to the native `pod` provider if the `SandboxClaim` CRD is not registered on the cluster. For dry-run testing without creating pods, set `--set sandbox.provider=noop`.
 
 ---
@@ -175,7 +185,7 @@ When resumed, `diverge-controller` mints a new Macaroon capability token reflect
 
 ## 5. Live LLM Cost & Token Enforcement (`POST /api/v1/agenttask/meter`)
 
-Sandbox LLM proxies and agent runtimes report incremental token and USD consumption (with an idempotent `requestId` and `iteration`) to `diverge-server` via `POST /api/v1/agenttask/meter`, authenticating with the mounted Macaroon capability token (`Authorization: Bearer <macaroon-token>`).
+Sandbox LLM proxies and agent runtimes report incremental token and USD consumption (with an idempotent `requestId` and an `iteration` counter) to `diverge-server` via `POST /api/v1/agenttask/meter`, authenticating with the mounted Macaroon capability token (`Authorization: Bearer <macaroon-token>`). Note that `requestId` is the sole deduplication key—a new request with a distinct `requestId` and the same `iteration` is still counted.
 
 ### Request & Response
 
@@ -260,7 +270,7 @@ except LLMMeterError as err:
   1. Transitions the `AgentTask` status phase to `Paused`.
   2. Sets `spec.suspended = true`.
   3. Revokes the capability token in `diverge-agenttask-tokens`.
-  4. Returns `429 Too Many Requests` with `{"allowed": false, "suspended": true, "reason": "budget exceeded", ...}` (or `"reason": "max iterations exceeded"` when `iteration > spec.maxIterations`).
+  4. Returns `429 Too Many Requests` with `{"allowed": false, "suspended": true, "reason": "budget exceeded", ...}` when cumulative USD or token limits are exceeded (or `"reason": "max iterations exceeded"` when `iteration > spec.maxIterations` and the effective USD/token budgets have not already been exceeded; if a single request crosses both a budget limit and `spec.maxIterations`, `"reason": "budget exceeded"` takes precedence).
 
 ---
 

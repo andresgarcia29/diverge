@@ -224,7 +224,7 @@ curl -N -X POST "$SERVER_URL/diverge.v1alpha1.EnvironmentService/StreamLogs" \
 
 #### AgentTask Live LLM Metering (`POST /api/v1/agenttask/meter`)
 
-Sandbox agents and LLM gateways report incremental token and USD spend (with an idempotent `requestId` and `iteration`) to `POST /api/v1/agenttask/meter` using the task's Macaroon capability token:
+Sandbox agents and LLM gateways report incremental token and USD spend (with an idempotent `requestId` and an `iteration` counter) to `POST /api/v1/agenttask/meter` using the task's Macaroon capability token (`requestId` is the sole deduplication key; a distinct `requestId` with the same `iteration` is counted as a new call):
 
 ```bash
 curl -s -X POST "$SERVER_URL/api/v1/agenttask/meter" \
@@ -235,7 +235,7 @@ curl -s -X POST "$SERVER_URL/api/v1/agenttask/meter" \
 
 - **`200 OK`**: Returns `{"allowed": true, "suspended": false, "totalTokensUsed": 1500, "totalCostUSD": 0.0225, "iteration": 1, "maxIterations": 5, "guidance": "...", "previewUrl": "https://..."}`. Recent `requestId` values are deduplicated while present in a bounded 32-entry ring buffer (`status.lastMeterRequestIds`) on the `AgentTask` so network retries across server replicas do not double-charge tokens or USD spend (if a retry arrives after 32 newer distinct requests have evicted that `requestId`, it will be counted as a new request).
 - **`403 Forbidden`**: Returned when `allowed_models` (`spec.capabilities`) is configured on the token/task and `model` is omitted or not permitted (supporting exact or prefix wildcards like `claude-*`).
-- **`429 Too Many Requests`**: Returned when cumulative token/USD usage exceeds the effective budget (`spec.budgetUSD` / `spec.budgetTokens` when positive, or the Macaroon's `max_cost_usd` / `max_tokens` caveats as fallback) with `"reason": "budget exceeded"`, or when `iteration > spec.maxIterations` with `"reason": "max iterations exceeded"`, automatically transitioning the `AgentTask` to `Paused`, setting `spec.suspended = true`, and revoking the token in `diverge-agenttask-tokens`.
+- **`429 Too Many Requests`**: Returned when cumulative token/USD usage exceeds the effective budget (`spec.budgetUSD` / `spec.budgetTokens` when positive, or the Macaroon's `max_cost_usd` / `max_tokens` caveats as fallback) with `"reason": "budget exceeded"`, or when `iteration > spec.maxIterations` (and the effective USD/token budgets have not already been exceeded) with `"reason": "max iterations exceeded"`. If a single request crosses both a budget limit and `spec.maxIterations`, `"reason": "budget exceeded"` takes precedence. In either case, `diverge-server` automatically transitions the `AgentTask` to `Paused`, sets `spec.suspended = true`, and revokes the token in `diverge-agenttask-tokens`.
 
 ### 2. TypeScript (`@connectrpc/connect-web`)
 

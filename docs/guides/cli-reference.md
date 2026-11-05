@@ -304,6 +304,8 @@ Run a unified verification suite against a preview `Environment` or `PreviewGrou
 
 **Usage:** `diverge verify <env-name> [path-or-url] [flags]`
 
+A positional `path-or-url` replaces all `--path` values. Use either the positional path or `--path` flags, not both.
+
 **Flags:**
 - `--path` — HTTP path(s) to probe (repeatable, default: `["/"]`; ignored if a positional `path-or-url` argument is provided)
 - `--expect-status` — Expected HTTP status code (default: `0`, accepting any final `2xx`/`3xx` status `< 400` after following redirects)
@@ -331,7 +333,7 @@ Create and manage spec-driven autonomous AI developer tasks (`AgentTask` CRDs) i
 
 **Subcommands:**
 - `diverge task init [--force]` — Scaffold `.diverge/agent.yaml` in your repository
-- `diverge task create "<objective>"` — Create an `AgentTask` (`--name`, `--repo`, `--base-branch`, `--budget`, `--iterations`, `--capabilities`, `--pool`, `--template`, `--dry-run`, `-o/--output yaml|json`)
+- `diverge task create "<objective>"` — Create an `AgentTask` (`--name`, `--repo`, `--base-branch`, `--budget`, `--iterations`, `--capabilities`, `--pool`, `--template`, `--dry-run`, `-o/--output text|yaml|json`; default: `text`)
 - `diverge task list` — List `AgentTask` resources in the namespace
 - `diverge task status <name>` — Show phase (`Pending`, `Provisioning`, `Active`, `Pausing`, `Paused`, `Completed`, `Failed`), iteration progress, token/USD spend, and linked preview URL
 - `diverge task logs <name> [-f]` — Stream live execution logs from the sandbox pod

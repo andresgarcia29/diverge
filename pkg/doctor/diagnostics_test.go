@@ -165,6 +165,83 @@ func TestDoctor_DivergedevComEnvironmentLabel(t *testing.T) {
 	assert.Contains(t, report.Issues[0].Component, "web-crash-pr-42")
 }
 
+func TestDoctor_PreviewGroupChildEnvironments(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, divergeiov1alpha1.AddToScheme(scheme))
+
+	pg := &divergeiov1alpha1.PreviewGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pg-42",
+			Namespace: "default",
+		},
+		Status: divergeiov1alpha1.PreviewGroupStatus{
+			Phase: divergeiov1alpha1.PreviewGroupPhaseDegraded,
+			Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+				{
+					Name:            "api",
+					EnvironmentName: "pg-42-api",
+					Namespace:       "default",
+					Phase:           divergeiov1alpha1.PhaseFailed,
+					Message:         "CrashLoopBackOff in api container",
+				},
+			},
+		},
+	}
+
+	childEnv := &divergeiov1alpha1.Environment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pg-42-api",
+			Namespace: "default",
+			Labels: map[string]string{
+				"divergedev.com/previewgroup": "pg-42",
+			},
+		},
+		Status: divergeiov1alpha1.EnvironmentStatus{
+			Phase: divergeiov1alpha1.PhaseFailed,
+		},
+	}
+
+	childPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pg-42-api-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"divergedev.com/environment": "pg-42-api",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "api",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "CrashLoopBackOff",
+							Message: "back-off restarting failed container=api",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pg, childEnv, childPod).
+		Build()
+
+	diagnoser := NewDiagnoser(c)
+	report, err := diagnoser.Diagnose(context.Background(), "default", "pg-42")
+	require.NoError(t, err)
+	assert.False(t, report.Healthy)
+	require.Len(t, report.Issues, 2)
+	assert.Equal(t, CodeEnvironmentFailed, report.Issues[0].Code)
+	assert.Contains(t, report.Issues[0].Component, "Environment/pg-42-api")
+	assert.Equal(t, CodeCrashLoopBackOff, report.Issues[1].Code)
+	assert.Contains(t, report.Issues[1].Component, "pg-42-api-pod")
+}
+
 func TestDoctor_EnvironmentDegradedAndMigrationFailed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))

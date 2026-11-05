@@ -78,12 +78,18 @@ Diverge relies on a configuration file inside your application repository to und
 Create a `.diverge.yaml` file in the root of your repository mapping source paths to your services:
 
 ```yaml
-version: v1
+version: "1"
 services:
   frontend:
-    path: apps/web/**
+    paths:
+      - apps/web/**
+    image:
+      repository: ghcr.io/my-org/frontend
   backend:
-    path: apps/api/**
+    paths:
+      - apps/api/**
+    image:
+      repository: ghcr.io/my-org/backend
 ```
 
 See the [Configuration Reference](configuration.md) for a full breakdown of `.diverge.yaml`.

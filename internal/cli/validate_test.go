@@ -221,6 +221,9 @@ func TestValidatePrintSchema(t *testing.T) {
 	assert.Equal(t, "Diverge Config", schema["title"])
 }
 
+// TestValidateDocsAndExampleConfigs validates examples/fullstack-demo/.diverge.yaml
+// and all .diverge.yaml fenced code blocks across README.md and docs/**/*.md against
+// the embedded JSON Schema.
 func TestValidateDocsAndExampleConfigs(t *testing.T) {
 	schemaBytes, err := schemaFS.ReadFile("schema/diverge-config.schema.json")
 	require.NoError(t, err)
@@ -272,6 +275,9 @@ func TestValidateDocsAndExampleConfigs(t *testing.T) {
 	assert.Greater(t, checkedBlocks, 0, "expected to validate at least one .diverge.yaml block in docs/")
 }
 
+// extractDivergeConfigYAMLBlocks extracts fenced YAML blocks from markdown that represent
+// a .diverge.yaml configuration file (identified by a top-level version key alongside
+// services, defaults, topology, notifications, or database, regardless of version value).
 func extractDivergeConfigYAMLBlocks(markdown string) []string {
 	var blocks []string
 	lines := strings.Split(markdown, "\n")
@@ -290,7 +296,7 @@ func extractDivergeConfigYAMLBlocks(markdown string) []string {
 		if trimmed == "```" {
 			inYAML = false
 			block := strings.Join(current, "\n")
-			if strings.Contains(block, `version: "1"`) && strings.Contains(block, "\nservices:") {
+			if isDivergeConfigYAMLBlock(block) {
 				blocks = append(blocks, block)
 			}
 			continue
@@ -298,4 +304,25 @@ func extractDivergeConfigYAMLBlocks(markdown string) []string {
 		current = append(current, line)
 	}
 	return blocks
+}
+
+// isDivergeConfigYAMLBlock returns true when a YAML snippet has a top-level "version:" key
+// and at least one top-level .diverge.yaml section ("services:", "defaults:", "topology:",
+// "notifications:", or legacy "database:").
+func isDivergeConfigYAMLBlock(block string) bool {
+	hasVersion := false
+	hasConfigMarker := false
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "version:") {
+			hasVersion = true
+		}
+		if strings.HasPrefix(line, "services:") ||
+			strings.HasPrefix(line, "defaults:") ||
+			strings.HasPrefix(line, "topology:") ||
+			strings.HasPrefix(line, "notifications:") ||
+			strings.HasPrefix(line, "database:") {
+			hasConfigMarker = true
+		}
+	}
+	return hasVersion && hasConfigMarker
 }

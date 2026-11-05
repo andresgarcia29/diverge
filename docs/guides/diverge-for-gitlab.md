@@ -54,7 +54,6 @@ services:
       - apps/web/**
     image:
       repository: registry.example.com/frontend
-      tag_template: "mr-{{.MR}}"
 ```
 When an MR is opened or updated, Diverge creates an `Environment` matching the MR ID and routes header-based traffic specifically to the updated service.
 
@@ -111,8 +110,8 @@ build-preview:
     - docker:24.0.5-dind
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -t $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA .
-    - docker push $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
+    - docker build -t $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHA:0:12} .
+    - docker push $CI_REGISTRY_IMAGE/frontend:${CI_COMMIT_SHA:0:12}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_EVENT_TYPE != "merge_train"
 

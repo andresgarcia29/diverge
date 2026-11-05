@@ -65,15 +65,16 @@ Diverge provides first-class support for [Ariga Atlas](https://atlasgo.io) to ma
 Configure `.diverge.yaml` in your project root:
 
 ```yaml
-version: 1
-database:
-  mode: schema
-  connection_ref: database-credentials
-  atlas:
-    mode: versioned
-    engine: job
-    dir: ./migrations
-    blocking: true
+version: "1"
+defaults:
+  database:
+    mode: schema
+    connection_ref: database-credentials
+    atlas:
+      mode: versioned
+      engine: job
+      dir: ./migrations
+      blocking: true
 ```
 
 Create a preview environment:
@@ -91,16 +92,17 @@ The CLI will output:
 ### 2. Declarative Schema from File
 
 ```yaml
-version: 1
-database:
-  mode: schema
-  connection_ref: database-credentials
-  atlas:
-    mode: declarative
-    engine: job
-    schema: ./schema.sql
-    policy:
-      destructive: allow
+version: "1"
+defaults:
+  database:
+    mode: schema
+    connection_ref: database-credentials
+    atlas:
+      mode: declarative
+      engine: job
+      schema: ./schema.sql
+      policy:
+        destructive: allow
 ```
 
 Apply with the CLI:

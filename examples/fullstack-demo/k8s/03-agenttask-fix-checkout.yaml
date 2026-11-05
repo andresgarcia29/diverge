@@ -12,7 +12,7 @@ metadata:
 spec:
   objective: "Fix currency rounding discrepancy for instant payouts in checkout-api and add table-driven unit tests"
   repository:
-    url: "https://github.com/divergedev/fullstack-demo.git"
+    url: "https://github.com/divergedev/diverge.git"
     baseBranch: "main"
     workingBranch: "agent/fix-pr-42-rounding"
   sandbox:
@@ -24,6 +24,7 @@ spec:
   budgetTokens: 200000
   maxIterations: 5
   capabilities:
+    - "claude-3-7-sonnet"
     - "fast"
     - "smart"
   draftPR: true

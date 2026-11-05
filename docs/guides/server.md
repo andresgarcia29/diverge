@@ -1,6 +1,6 @@
 # Diverge ConnectRPC API Server Guide
 
-The Diverge API server ([`cmd/server/main.go`](file:///Users/ab/code/divergedev/diverge/cmd/server/main.go)) provides a high-performance, Kubernetes-native ConnectRPC API for managing Diverge custom resources (`Environment`, `PreviewGroup`). Built with [ConnectRPC](https://connectrpc.com/), it delivers seamless interoperability across HTTP/1.1 JSON, HTTP/2, gRPC, and gRPC-Web without requiring an external proxy or transcoder.
+The Diverge API server ([`cmd/server/main.go`](file:///Users/ab/code/divergedev/diverge/cmd/server/main.go)) provides a high-performance, Kubernetes-native ConnectRPC API for managing Diverge custom resources (`Environment`, `PreviewGroup`, `AgentTask`). Built with [ConnectRPC](https://connectrpc.com/), it delivers seamless interoperability across HTTP/1.1 JSON, HTTP/2, gRPC, and gRPC-Web without requiring an external proxy or transcoder.
 
 ---
 
@@ -22,6 +22,7 @@ Apply the CustomResourceDefinitions and install the Diverge Helm chart with the 
 # Apply Diverge CRDs
 kubectl apply -f https://raw.githubusercontent.com/divergedev/diverge/main/config/crd/bases/divergedev.com_environments.yaml
 kubectl apply -f https://raw.githubusercontent.com/divergedev/diverge/main/config/crd/bases/divergedev.com_previewgroups.yaml
+kubectl apply -f https://raw.githubusercontent.com/divergedev/diverge/main/config/crd/bases/divergedev.com_agenttasks.yaml
 
 # Install Diverge with the API server enabled
 helm upgrade --install diverge charts/diverge \
@@ -223,18 +224,18 @@ curl -N -X POST "$SERVER_URL/diverge.v1alpha1.EnvironmentService/StreamLogs" \
 
 #### AgentTask Live LLM Metering (`POST /api/v1/agenttask/meter`)
 
-Sandbox agents and LLM gateways report incremental token and USD spend to `POST /api/v1/agenttask/meter` using the task's Macaroon capability token:
+Sandbox agents and LLM gateways report incremental token and USD spend (with an idempotent `requestId` and an `iteration` counter) to `POST /api/v1/agenttask/meter` using the task's Macaroon capability token (`requestId` is the sole deduplication key; a distinct `requestId` with the same `iteration` is counted as a new call):
 
 ```bash
 curl -s -X POST "$SERVER_URL/api/v1/agenttask/meter" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MACAROON_TOKEN" \
-  -d '{"model": "claude-3-7-sonnet", "tokensUsed": 1500, "costUSD": 0.0225}' | jq .
+  -d '{"requestId": "iter-1", "iteration": 1, "model": "claude-3-7-sonnet", "tokensUsed": 1500, "costUSD": 0.0225}' | jq .
 ```
 
-- **`200 OK`**: Returns `{"allowed": true, "suspended": false, "totalTokensUsed": 1500, "totalCostUSD": 0.0225}`.
-- **`403 Forbidden`**: Returned when `model` is omitted or not listed in the token's `allowed_models` caveats (`spec.capabilities`).
-- **`429 Too Many Requests`**: Returned when cumulative token or USD usage exceeds the task budget (`"allowed": false, "suspended": true, "reason": "budget exceeded"`), automatically transitioning the `AgentTask` to `Paused`, setting `spec.suspended = true`, and revoking the token in `diverge-agenttask-tokens`.
+- **`200 OK`**: Returns `{"allowed": true, "suspended": false, "totalTokensUsed": 1500, "totalCostUSD": 0.0225, "iteration": 1, "maxIterations": 5, "guidance": "...", "previewUrl": "https://..."}`. Recent `requestId` values are deduplicated while present in a bounded 32-entry ring buffer (`status.lastMeterRequestIds`) on the `AgentTask` so network retries across server replicas do not double-charge tokens or USD spend (if a retry arrives after 32 newer distinct requests have evicted that `requestId`, it will be counted as a new request).
+- **`403 Forbidden`**: Returned when `allowed_models` (`spec.capabilities`) is configured on the token/task and `model` is omitted or not permitted (supporting exact or prefix wildcards like `claude-*`).
+- **`429 Too Many Requests`**: Returned when cumulative token/USD usage exceeds the effective budget (`spec.budgetUSD` / `spec.budgetTokens` when positive, or the Macaroon's `max_cost_usd` / `max_tokens` caveats as fallback) with `"reason": "budget exceeded"`, or when `iteration > spec.maxIterations` (and the effective USD/token budgets have not already been exceeded) with `"reason": "max iterations exceeded"`. If a single request crosses both a budget limit and `spec.maxIterations`, `"reason": "budget exceeded"` takes precedence. In either case, `diverge-server` automatically transitions the `AgentTask` to `Paused`, sets `spec.suspended = true`, and revokes the token in `diverge-agenttask-tokens`.
 
 ### 2. TypeScript (`@connectrpc/connect-web`)
 

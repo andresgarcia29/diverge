@@ -61,7 +61,7 @@ Before connecting your AI editor to the Diverge MCP server, ensure you have:
 
 1. **Diverge CLI** installed (`diverge version`):
    ```bash
-   curl -fsSL https://divergedev.com/install.sh | sh
+   curl -fsSL https://divergedev.com/install.sh -o install.sh && sh install.sh
    ```
 2. **Access to a Diverge API Server** (`diverge-server`):
    - **In-cluster / Remote**: An accessible ConnectRPC endpoint (e.g., `https://diverge.example.com` or via ingress).
@@ -125,6 +125,7 @@ The MCP server provides the following tools grouped by service:
 | `diverge_wait_for_ready` | Block execution until a target environment reaches `Ready` or `Failed` phase (max 5 minutes). |
 | `diverge_fetch_errors` | Retrieve the last error-level (`ERROR`, `FATAL`, `panic`) log lines from an environment to diagnose failures. |
 | `diverge_doctor` | Run cluster and environment health checks (GatewayClass, CRDs, RBAC, database connectivity). |
+| `diverge_verify` | Run the unified verification suite (Doctor Kubernetes workload diagnostics, routed HTTP readiness status check, optional latency threshold check, and optional baseline status parity). |
 | `diverge_loadtest` | Run a bounded HTTP/gRPC load test against a preview environment and return latency/error percentiles. |
 | `diverge_visual_test` | Compare baseline and preview PNG screenshots (`baseline_path`/`preview_path` or batch `baseline_dir`/`preview_dir`) and return pixel-diff pass/fail metrics (writing diff PNGs when `diff_output_path` is set and diff data exists). |
 
@@ -133,12 +134,12 @@ The MCP server provides the following tools grouped by service:
 | Tool Name | Description |
 | :--- | :--- |
 | `diverge_create_task` | Spawn a new sandboxed `AgentTask` with repository, branch, model capabilities, and USD/token/iteration budgets. |
-| `diverge_get_task` | Retrieve the current phase (`Pending`, `Provisioning`, `Active`, `Paused`, `Completed`, `Failed`), iteration count, token usage, and sandbox pod status. |
+| `diverge_get_task` | Retrieve the current phase (`Pending`, `Provisioning`, `Active`, `Pausing`, `Paused`, `Completed`, `Failed`), iteration count, token usage, and sandbox pod status. |
 | `diverge_list_tasks` | List `AgentTask` resources in a namespace with optional phase filtering. |
 | `diverge_pause_task` | Suspend an active `AgentTask` (`spec.suspended: true`) so the controller transitions it to `Paused` and revokes its Macaroon capability token upon reconciliation. |
 | `diverge_resume_task` | Resume a paused `AgentTask` and mint a fresh Macaroon capability token. |
 | `diverge_guide_task` | Send steering instructions or updated budget/iteration limits to an `AgentTask` and resume execution. |
-| `diverge_cancel_task` | Cancel and tear down an `AgentTask` sandbox (*requires `--allow-destructive`*). |
+| `diverge_delete_task` | Delete an `AgentTask` and tear down its sandbox (*requires `--allow-destructive`*). |
 
 ---
 
@@ -225,12 +226,12 @@ Add the server entry to `.vscode/mcp.json` in your project workspace:
 ## 6. Destructive Operations
 
 By default, the CLI `diverge mcp` `stdio` server operates in **safe mode**:
-- Destructive tools (`diverge_delete_environment`, `diverge_delete_preview_group`, and `diverge_cancel_task`) are **omitted** from the CLI's registered tool registry.
-- AI assistants connected over `stdio` cannot accidentally delete active preview environments, tear down running `PreviewGroup`s, or cancel running `AgentTask`s unless `--allow-destructive` is set.
+- Destructive tools (`diverge_delete_environment`, `diverge_delete_preview_group`, and `diverge_delete_task`) are **omitted** from the CLI's registered tool registry.
+- AI assistants connected over `stdio` cannot accidentally delete active preview environments, tear down running `PreviewGroup`s, or delete running `AgentTask`s unless `--allow-destructive` is set.
 
 ### Enabling Destructive Tools on the CLI
 
-To allow your AI assistant to use `diverge_delete_environment`, `diverge_delete_preview_group`, and `diverge_cancel_task` over `diverge mcp`, append the `--allow-destructive` flag:
+To allow your AI assistant to use `diverge_delete_environment`, `diverge_delete_preview_group`, and `diverge_delete_task` over `diverge mcp`, append the `--allow-destructive` flag:
 
 ```json
 {
@@ -259,7 +260,7 @@ To allow your AI assistant to use `diverge_delete_environment`, `diverge_delete_
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--server-url` | `string` | `""` | Diverge API server URL. If empty, falls back to `DIVERGE_SERVER_URL` environment variable. |
-| `--allow-destructive` | `bool` | `false` | Enable destructive tools (`delete` / `cancel` methods). |
+| `--allow-destructive` | `bool` | `false` | Enable destructive tools (`diverge_delete_environment`, `diverge_delete_preview_group`, and `diverge_delete_task`). |
 
 ### Global Flags
 

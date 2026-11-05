@@ -12,12 +12,12 @@
   <a href="https://github.com/divergedev/diverge/releases/latest"><img src="https://img.shields.io/github/v/release/divergedev/diverge" alt="Release"></a>
 </p>
 
-Environment-as-a-service engine for Kubernetes. Diverge creates ephemeral preview environments with async routing, Prometheus observability, GitLab support, SDK propagation, and configurable database provisioning. Extensible via a pluggable provider registry.
+Open-source Kubernetes environment-as-a-service and autonomous AI agent sandbox engine (100% Apache-2.0). Diverge deploys delta preview environments with scale-to-zero hibernation, L7 header/subdomain routing, PostgreSQL schema/FK/view cloning, async/storage isolation (Kafka, Temporal, Redis/Valkey, S3/GCS/MinIO), OpenFeature flags, and network-isolated `AgentTask` sandboxes with Macaroon capability tokens and a built-in MCP server.
 
 ### Get Started
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/divergedev/diverge/main/install.sh | sh
+curl -fsSL https://divergedev.com/install.sh -o install.sh && sh install.sh
 ```
 
 Documentation: [https://divergedev.com](https://divergedev.com)
@@ -26,7 +26,7 @@ Documentation: [https://divergedev.com](https://divergedev.com)
 - [Fullstack Multi-Service Demo Monorepo (`examples/fullstack-demo/`)](docs/guides/fullstack-demo.md)
 - [Autonomous Agent Sandboxes & Capability Auth](docs/guides/agent-sandboxes.md)
 - [MCP Server & IDE Integration Guide](docs/guides/mcp-server.md)
-- [Database Branching & Atlas Migrations](docs/guides/database-branching-atlas.md)
+- [Database Branching & Atlas Migrations](docs/guides/database-atlas.md)
 - [CI/CD Workflows (GitHub Actions & GitLab CI)](docs/guides/ci-cd-workflows.md)
 - [Web Dashboard & OIDC Setup](docs/guides/dashboard-and-oidc.md)
 - [Service Mesh & Gateway API Chooser](docs/guides/routing-and-mesh-chooser.md)
@@ -53,10 +53,10 @@ Documentation: [https://divergedev.com](https://divergedev.com)
   <img src="docs/assets/terminal-quickstart-demo.svg" alt="Diverge CLI Quickstart Demo" width="100%">
 </p>
 
-You can quickly test Diverge locally with the CLI:
+You can quickly test Diverge locally with the CLI (run inside your Git repository checkout with an `origin` remote configured):
 
 ```bash
-diverge preview create --name pr-42 --branch feat/my-change --service my-app=ghcr.io/my-org/my-app:pr-42
+diverge preview create --name pr-42 --service my-app=ghcr.io/my-org/my-app:pr-42
 diverge verify pr-42 --compare-baseline
 diverge top --once
 ```
@@ -106,7 +106,7 @@ See [charts/diverge/values.yaml](charts/diverge/values.yaml) for configuration o
 *   **Activator Proxy (`activator-proxy`)**: Smart routing that directs traffic to the pod when ready. Includes `X-Preview-Env` header injection, a shared informer for efficient pod state tracking, and an optional auto-refreshing HTML wake-up splash page (`--wake-splash` flag / `X-Diverge-Wake-Splash: true` header and `GET /-/wakeup-status` readiness endpoint).
 *   **Delta Deployment & Baseline Drift Detection**: Only deploy what changed, falling back to a baseline for unmodified services. Automatically computes a deterministic SHA-256 baseline fingerprint (`divergedev.com/baseline-fingerprint`) across baseline `Deployment`s, `ConfigMap`s, and `Secret`s, surfacing drift warnings (`BaselineDriftDetected=True`, `⚠️ drift` in `diverge top`) or auto-refreshing preview pods (`divergedev.com/drift-policy: sync`).
 *   **Header-Based Routing & Gateway API**: Leverages Gateway API (`HTTPRoute` + `GRPCRoute` + cross-namespace `ReferenceGrant`), Istio (`ambient-mesh` / `waypoint`), Cilium, Linkerd, and the Diverge Proxy to route traffic seamlessly using HTTP/gRPC headers.
-*   **Configurable DB Modes & Atlas Migrations**: Options for `shared`, `schema`, `snapshot`, or `fresh` databases via in-cluster `schema` and CloudNativePG (`cnpg`) providers, plus native [Atlas Operator](docs/guides/database-branching-atlas.md) (`AtlasMigration` / `AtlasSchema`) integration.
+*   **Configurable DB Modes & Atlas Migrations**: Options for `shared`, `schema`, `snapshot`, or `fresh` databases via in-cluster `schema` and CloudNativePG (`cnpg`) providers, plus native [Atlas Operator](docs/guides/database-atlas.md) (`AtlasMigration` / `AtlasSchema`) integration.
 *   **Schema-per-Environment**: Actual execution of SQL-based schema provisioning (via `SQLExecutor`) with `public` schema write-protection, declarative `seedSource` seeding (`public`, `schema:<name>`, `configmap:<name>[/<key>]`) including foreign keys, sequences, and views, regex-validated naming, injection prevention, auto-generated `diverge-db-env-<env>` Secret (`DATABASE_URL` and `DIVERGE_PREVIEW_SCHEMA`), and automated migration Jobs.
 *   **MR-Triggered Lifecycle**: Environments spin up when a Merge Request opens and tear down upon merge/close.
 *   **Merge Gating**: GitLab/GitHub commit status checks (`diverge/preview`) block merges until environments are healthy.
@@ -151,13 +151,14 @@ Diverge takes security seriously. The platform features strict CRD OpenAPI valid
   <img src="docs/assets/architecture-overview.svg" alt="Diverge End-to-End Architecture Overview" width="100%">
 </p>
 
-Diverge consists of 5 core binaries and an embedded Web UI compiled and released via `goreleaser`:
+Diverge consists of 6 core binaries and an embedded Web UI (`diverge-controller`, `diverge-server`, `diverge-proxy`, `diverge-activator-proxy`, and `diverge` compiled via `goreleaser`, plus `cmd/agent-runner` packaged via `Dockerfile.agent-runner`):
 
 1.  **Controller (`diverge-controller`)**: The Kubernetes operator that watches `PreviewGroup`, `Environment`, and `AgentTask` Custom Resources (CRs), reconciles them, and provisions routing, databases, sandboxes, and GitOps resources.
-2.  **API Server & Web UI (`diverge-server`)**: ConnectRPC server (`server.enabled: true`) serving the embedded React Web Dashboard, OIDC/TokenReview/Macaroon authentication, real-time environment/log streaming, and local-to-cluster HTTP tunnels.
-3.  **Proxy (`diverge-proxy`)**: A reverse proxy that facilitates header-based L7 routing to preview environments.
-4.  **Activator (`activator-proxy`)**: A proxy for scale-to-zero workloads. Wakes up sleeping pods on the first request and seamlessly routes traffic once they are ready.
-5.  **CLI & MCP Server (`diverge`)**: Terminal CLI and stdio Model Context Protocol (`diverge mcp`) server for AI agents and IDEs.
+2.  **API Server & Web UI (`diverge-server`)**: ConnectRPC server (`server.enabled: true`) serving the embedded React Web Dashboard, OIDC/TokenReview/Macaroon authentication, real-time environment/log streaming, LLM metering (`POST /api/v1/agenttask/meter`), and local-to-cluster HTTP tunnels.
+3.  **Proxy (`diverge-proxy`)**: A reverse proxy that facilitates header-based L7 routing and `<diverge-toolbar>` preview banner injection.
+4.  **Activator (`diverge-activator-proxy`)**: A proxy for scale-to-zero workloads. Wakes up sleeping pods on the first request and seamlessly routes traffic once they are ready.
+5.  **Agent Runner (`diverge-agent-runner`)**: Reference autonomous coding agent entrypoint (`cmd/agent-runner`, packaged via `Dockerfile.agent-runner` as `ghcr.io/divergedev/agent-runner`) executing metered build-verify-fix loops inside `AgentTask` sandboxes.
+6.  **CLI & MCP Server (`diverge`)**: Terminal CLI and stdio Model Context Protocol (`diverge mcp`) server for AI agents and IDEs.
 
 ## PreviewGroup Example
 
@@ -201,8 +202,13 @@ The `diverge` CLI helps you manage environments efficiently:
 *   `diverge doctor` - Diagnose cluster, CRD, Gateway, and environment health
 *   `diverge env export` - Export environment variables (dotenv, JSON, shell)
 *   `diverge mcp` - Run MCP server over stdio (`diverge mcp setup` to auto-configure Cursor, Claude Code, and Windsurf)
-*   `diverge preview` - Create preview environments from CLI
-*   `diverge validate` - Validate your `.diverge.yaml`
+*   `diverge task` - Manage autonomous AI coding tasks (`init`, `create`, `status`, `list`, `logs`, `guide`, `pause`, `resume`, `delete`)
+*   `diverge preview` - Create and manage multi-service `PreviewGroup`s from the CLI (`create`, `status`, `watch`, `delete`)
+*   `diverge diff` - Detect which services changed relative to a base branch
+*   `diverge route` - Simulate request routing through the service topology
+*   `diverge graph` - Display (`show`) or validate (`validate`) the service dependency graph
+*   `diverge completion` - Generate shell autocompletion scripts (`bash`, `zsh`, `fish`, `powershell`) with live cluster resource completion
+*   `diverge validate` - Validate your `.diverge.yaml` against the embedded JSON Schema (`--print-schema`)
 *   `diverge delete` - Delete an environment
 *   `diverge version` - Show CLI version
 
@@ -211,7 +217,7 @@ The `diverge` CLI helps you manage environments efficiently:
 Install via shell script:
 
 ```bash
-curl -fsSL https://divergedev.com/install.sh | sh
+curl -fsSL https://divergedev.com/install.sh -o install.sh && sh install.sh
 ```
 
 Or download and verify first:
@@ -230,9 +236,7 @@ go install github.com/divergedev/diverge/cmd/diverge@latest
 ### Install via Helm (Kubernetes Operator)
 
 ```bash
-helm repo add diverge https://divergedev.github.io/diverge
-helm repo update
-helm install diverge diverge/diverge --namespace diverge-system --create-namespace
+helm install diverge oci://ghcr.io/divergedev/charts/diverge --namespace diverge-system --create-namespace
 ```
 
 ### Docker Images (for reference)

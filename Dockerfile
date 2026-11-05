@@ -14,8 +14,8 @@ COPY web/ ./
 COPY --from=proto-gen /workspace/web/src/api/gen ./src/api/gen
 RUN npm run build
 
-# Go build stage (golang:1.26)
-FROM golang@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS builder
+# Go build stage (golang:1.26.10)
+FROM golang@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH
 

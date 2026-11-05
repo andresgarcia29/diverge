@@ -4,51 +4,57 @@ This document provides context and guidelines for AI coding assistants and agent
 
 ## Project Overview
 
-Diverge is an open-source Kubernetes operator and environment-as-a-service platform that creates ephemeral preview environments triggered by merge request events. Core capabilities include delta deployments, composable environments with service topology, async routing (Kafka, Temporal, Webhook), configurable database provisioning, header-based and subdomain routing, a ConnectRPC API server with OIDC authentication, and an MCP server for AI agent integration.
+Diverge is an open-source (100% Apache-2.0) Kubernetes operator, environment-as-a-service platform, and autonomous AI agent sandbox engine. Core capabilities include delta deployments (`PreviewGroup` & `Environment`), scale-to-zero hibernation (`activator-proxy`, KEDA, and idle hibernation annotations), service topology resolution, async/storage routing (Kafka, Temporal, Redis/Valkey, S3/GCS/MinIO, Webhook), configurable database provisioning (`schema` with FK/view cloning, `cnpg` CloudNativePG, Ariga Atlas), OpenFeature flags (`flipt`, `unleash`, `flagd`), header-based and subdomain L7 routing, autonomous `AgentTask` sandboxes (`agent-sandbox`, `pod` / `k8s-pod`) with attenuated Macaroon capability tokens and idempotent LLM metering (`POST /api/v1/agenttask/meter`), a ConnectRPC API server with OIDC/TokenReview/Macaroon authentication and embedded React Web UI, and a built-in Model Context Protocol (`diverge mcp` & `POST /mcp`) server.
 
 ## Architecture
 
-The project consists of four main binaries:
-1. **Controller (`cmd/controller`)**: A Kubernetes operator built with `controller-runtime`. Watches `Environment` and `PreviewGroup` CRDs, provisions resources (routing, databases, ArgoCD apps, async infra).
-2. **Server (`cmd/server`)**: ConnectRPC API server with OIDC + K8s TokenReview dual auth, real-time streaming, dashboard UI, and MCP server.
-3. **Proxy (`cmd/proxy`)**: A reverse proxy for header-based and subdomain routing to preview environments.
-4. **CLI (`cmd/diverge`)**: Command-line interface built with `cobra` for managing environments (`create`, `list`, `delete`, `dev`, `diff`, `route`, `graph`, `mcp`, `validate`, `status`, etc.).
+The project consists of six main binaries:
+1. **Controller (`cmd/controller`)**: Kubernetes operator built with `controller-runtime`. Watches `Environment`, `PreviewGroup`, and `AgentTask` CRDs, provisions resources (routing, databases, sandboxes, ArgoCD/Direct deployments, async/storage infra, OpenFeature flags), and enforces FinOps namespace quotas and baseline drift detection.
+2. **Server (`cmd/server`)**: ConnectRPC API server (`:8443` HTTPS and `:8080` in-cluster HTTP) with OIDC + K8s TokenReview + Macaroon triple auth, real-time SSE/streaming, embedded React Web Dashboard, HTTP `/mcp` server, `POST /api/v1/agenttask/meter` LLM metering endpoint, and reverse developer tunnels.
+3. **Proxy (`cmd/proxy`)**: L7 reverse proxy for header-based, cookie (`?_diverge_env=`), and subdomain routing plus `<diverge-toolbar>` preview banner injection.
+4. **Activator Proxy (`cmd/activator-proxy`)**: Scale-to-zero reverse proxy that tracks pod readiness via shared informers, wakes scaled-to-zero deployments on incoming requests, and serves an optional `202 Accepted` auto-refreshing browser wake-up splash screen (`--wake-splash`).
+5. **Agent Runner (`cmd/agent-runner`)**: Reference autonomous coding agent entrypoint (`ghcr.io/divergedev/agent-runner`) that executes metered build-verify-fix iterations inside `AgentTask` sandboxes.
+6. **CLI (`cmd/diverge`)**: Command-line interface built with `cobra` for managing environments and agent tasks (`init`, `create`, `curl`, `verify`, `top`, `list`, `delete`, `dev`, `diff`, `doctor`, `route`, `graph`, `mcp`, `preview`, `task`, `validate`, `status`, `completion`, etc.).
 
 Slim builds are available with build tags: `no_knative`, `no_schema`, `no_temporal`, `no_kafka`.
 
 ## Key Packages
 
-- `cmd/`: Entrypoints for the four binaries.
-- `internal/cli/`: Implementation of the Cobra CLI commands.
-- `internal/controller/`: K8s operator reconciliation loop.
-- `internal/server/`: ConnectRPC server, auth, dashboard, streaming.
-- `internal/server/auth/`: OIDC, GitHub, TokenReview authentication with CompositeProvider.
+- `cmd/`: Entrypoints for the six binaries (`controller`, `server`, `proxy`, `activator-proxy`, `agent-runner`, `diverge`).
+- `internal/cli/`: Implementation of the Cobra CLI commands (`task`, `verify`, `top`, `mcp`, `doctor`, `init`, `preview`, `dev`, etc.).
+- `internal/controller/`: K8s operator reconciliation loops (`EnvironmentReconciler`, `PreviewGroupReconciler`, `AgentTaskReconciler`, drift detection, quota enforcement).
+- `internal/sandbox/`: Sandbox providers (`AgentSandboxProvider` for `agents.x-k8s.io/v1alpha1`, `PodSandboxProvider` for zero-CRD hardened native pods, `NoopSandboxProvider`).
+- `internal/agentrunner/`: Autonomous agent runner loop, metering client, and workspace git orchestration.
+- `internal/server/`: ConnectRPC server, auth, embedded dashboard, streaming, `llm_meter.go`, and reverse tunnels.
+- `internal/server/auth/`: OIDC, GitHub, TokenReview, and Macaroon authentication with `CompositeProvider`.
 - `internal/server/dashboard/`: Embedded React dashboard (Vite + TypeScript).
-- `internal/notifier/`: GitLab/GitHub MR/PR comment notifications and commit status reporting.
-- `internal/webhook/`: Webhook handlers for GitLab/GitHub events.
-- `internal/proxy/`: Reverse proxy with header-based and subdomain routing.
-- `internal/routing/`: Gateway API HTTPRoute generation (header + subdomain modes).
-- `internal/argocd/`: ArgoCD Application generation (Helm + Kustomize).
-- `internal/database/`: Database provisioning (shared, schema, snapshot, fresh) with SchemaProvider.
-- `internal/deployer/`: Deployer interface, ArgoCD deployer, KEDA ScaledObject generation.
-- `internal/config/`: `.diverge.yaml` parsing with strict validation (`KnownFields(true)`).
+- `internal/notifier/`: GitLab/GitHub MR/PR comment notifications, `SCMTaskNotifier`, and commit status reporting.
+- `internal/webhook/`: Webhook handlers for GitLab/GitHub events and `/diverge` slash commands (`preview`, `fix`, `guide`, `budget`, `status`, `help`, `pause`, `resume`, `extend-ttl`, `teardown`).
+- `internal/proxy/` & `internal/activator/`: L7 routing proxy and scale-to-zero activator proxy.
+- `internal/routing/`: Gateway API (`HTTPRoute` + `GRPCRoute` + `ReferenceGrant`), Istio, Cilium, Linkerd routers.
+- `internal/argocd/`: ArgoCD `Application` generation (Helm + Kustomize).
+- `internal/database/`: Database provisioning (`schemaprovider` with FK/sequence/view cloning, `cnpg` CloudNativePG, `atlas` migrations).
+- `internal/deployer/`: Deployer interface, `DirectDeployer`, `ArgoCDDeployer`, `KnativeDeployer`, KEDA `ScaledObject`/`HTTPScaledObject` generation.
+- `internal/config/`: `.diverge.yaml` and `.diverge/agent.yaml` parsing with strict validation (`KnownFields(true)`).
 - `internal/changeset/`: Git diff → changed service detection for `diverge diff`.
-- `internal/async/`: Async routing providers (Kafka, Temporal, Webhook) + provisioner.
-- `internal/metrics/`: Prometheus metrics (reconciliation, deployments, routing, environments).
-- `internal/events/`: Event system.
+- `internal/async/`: Async & storage isolation providers (`kafka`, `temporal`, `redis`/`valkey`, `storage` for S3/GCS/MinIO, `webhook`).
+- `internal/metrics/`: Prometheus metrics and FinOps hourly cost estimator (`cost.go`).
+- `pkg/auth/`: HMAC-SHA256 chained Macaroon capability tokens and Kubernetes Secret token store (`diverge-agenttask-tokens`).
+- `pkg/doctor/`: Root-cause diagnostic engine (`DIV-101`–`DIV-110`).
+- `pkg/features/`: OpenFeature flag providers (`flipt`, `unleash`, `flagd`, `configmap`).
 - `pkg/topology/`: Service graph resolution (static, Gateway API, Prometheus discovery).
-- `pkg/sdk/`: SDK for programmatic environment management (HTTP, gRPC, Connect, Kafka).
-- `api/v1alpha1/`: CRD types with OpenAPI validation.
+- `pkg/sdk/`: Context propagation & LLM metering SDKs (`http`, `grpc`, `connect`, `kafka`, `openfeature`, `temporal`, `node`, `python`).
+- `api/v1alpha1/`: CRD types (`Environment`, `PreviewGroup`, `AgentTask`) with OpenAPI & admission webhook validation.
 - `proto/diverge/v1alpha1/`: Protobuf definitions.
-- `gen/`: Generated protobuf-go, ConnectRPC stubs, and proto2type domain types.
+- `gen/`: Generated protobuf-go and ConnectRPC stubs.
 - `web/`: React dashboard (Vite + TypeScript). Proto files are gitignored — run `buf generate --template buf.gen.web.yaml`.
-- `charts/diverge/`: Helm chart for deploying Diverge.
+- `charts/diverge/`: Official Helm chart.
 
 ## Build System
 
 - **Nix**: We use Nix for managing development environments (`flake.nix`). **All terminal commands must be run inside the Nix dev shell by prefixing with `nix develop -c`.** This includes `git commit` (for pre-commit hooks).
-- **Make**: Standard targets include `make install` (install CRDs), `make run` (run operator locally), `make test`, `make build`, `make generate` and `make manifests` (controller-gen), and `make proto` (generate protobuf/ConnectRPC/domain types).
-- **Proto**: Uses `buf` for protobuf generation and `proto2type` for domain type generation. Run `make proto` after editing `.proto` files.
+- **Make**: Standard targets include `make install` (install CRDs), `make run` (run operator locally), `make test`, `make build`, `make generate` and `make manifests` (controller-gen), and `make proto` (generate protobuf/ConnectRPC stubs).
+- **Proto**: Uses `buf` for protobuf generation and `protojson` bridge (`internal/server/convert.go`) for CRD-to-Proto mapping. Run `make proto` after editing `.proto` files.
 - **Go**: Version 1.26.
 - **Dashboard**: `cd web && npm ci && npm run build`. Generated proto TS files require `buf generate --template buf.gen.web.yaml` first.
 
@@ -57,11 +63,9 @@ Slim builds are available with build tags: `no_knative`, `no_schema`, `no_tempor
 - We use `testify/assert` and `testify/require` for assertions.
 - We favor **table-driven tests** for comprehensive coverage.
 - We use `httptest` for testing HTTP servers/clients.
-- We use Property-Based Testing (PBT) with `pgregory.net/rapid`.
-- Packages with PBTs: `auth`, `proxy`, `webhook`, `controller`, `routing`, `argocd`, `api/v1alpha1`, `database`, `notifier`, `changeset`, `cli`, `topology`, `async`, `server/streaming`, `cache`, `session`.
-- Currently passing **943 tests**.
+- We use Property-Based Testing (PBT) with `hegel.dev/go/hegel` (`*_property_test.go`).
 - Config YAML tests **must** include `version: "1"` (strict decoding with `KnownFields(true)`).
-- Config YAML tags use **snake_case** for most fields (`tag_template`, `header_key`, `baseline_namespace`) but **camelCase** for newer fields (`dependsOn`, `asyncRoutes`, `tagTemplate` is NOT valid — use `tag_template`).
+- Config YAML tags use **snake_case** for most fields (`tag_template`, `header_key`, `baseline_namespace`) but **camelCase** for newer fields (`dependsOn`, `asyncRoutes`; `tagTemplate` is NOT valid — use `tag_template`).
 
 ## Conventions
 
@@ -91,7 +95,7 @@ Slim builds are available with build tags: `no_knative`, `no_schema`, `no_tempor
 ## CI/CD
 
 - **GitHub Actions**: Workflows in `.github/workflows/` — `ci.yml` (build+test, lint, file-hygiene, helm-lint, check-generated, test-guardrails), `e2e.yml` (dual-cluster k3d tests), `release.yml` (GoReleaser on `v*` tags).
-- **GoReleaser**: Builds 4 binaries (controller, server, proxy, CLI) × 2 OS × 2 arch + slim variants. Dashboard built via `before.hooks` (buf generate + npm build). Docker images pushed to `ghcr.io/divergedev/diverge`.
+- **GoReleaser**: Builds 5 binaries (`diverge-controller`, `diverge-server`, `diverge-proxy`, `diverge-activator-proxy`, `diverge` CLI) × 2 OS × 2 arch + slim variants. The `diverge` CLI also builds for `windows` (`amd64`, `arm64`) in both full and slim variants. Dashboard built via `before.hooks` (buf generate + npm build). Docker images pushed to `ghcr.io/divergedev/diverge`, `ghcr.io/divergedev/activator-proxy`, and `ghcr.io/divergedev/diverge-cli`.
 - **Pre-push guards**: `check-test-files` (every .go needs _test.go), `check-generated-stale` (runs make generate + git diff), `golangci-lint`, `go-test`.
 
 ## Supported Protocols

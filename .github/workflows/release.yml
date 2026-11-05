@@ -65,6 +65,17 @@ jobs:
           CHART_VERSION: ${{ steps.tag.outputs.version }}
         run: |
           helm push "diverge-${CHART_VERSION}.tgz" oci://ghcr.io/divergedev/charts
+      - name: Build and push agent-runner image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            -f Dockerfile.agent-runner \
+            -t "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}" \
+            -t "ghcr.io/divergedev/agent-runner:latest" \
+            .
       - name: Generate SBOM
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -72,6 +83,7 @@ jobs:
           syft "ghcr.io/divergedev/diverge:${RELEASE_TAG}" -o spdx-json > diverge-sbom.spdx.json
           syft "ghcr.io/divergedev/activator-proxy:${RELEASE_TAG}" -o spdx-json > activator-proxy-sbom.spdx.json
           syft "ghcr.io/divergedev/diverge-cli:${RELEASE_TAG}" -o spdx-json > diverge-cli-sbom.spdx.json
+          syft "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}" -o spdx-json > agent-runner-sbom.spdx.json
       - name: Sign container image
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -79,6 +91,7 @@ jobs:
           cosign sign --yes "ghcr.io/divergedev/diverge:${RELEASE_TAG}"
           cosign sign --yes "ghcr.io/divergedev/activator-proxy:${RELEASE_TAG}"
           cosign sign --yes "ghcr.io/divergedev/diverge-cli:${RELEASE_TAG}"
+          cosign sign --yes "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}"
       - name: Attach SBOM
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -86,6 +99,7 @@ jobs:
           cosign attach sbom --sbom diverge-sbom.spdx.json "ghcr.io/divergedev/diverge:${RELEASE_TAG}"
           cosign attach sbom --sbom activator-proxy-sbom.spdx.json "ghcr.io/divergedev/activator-proxy:${RELEASE_TAG}"
           cosign attach sbom --sbom diverge-cli-sbom.spdx.json "ghcr.io/divergedev/diverge-cli:${RELEASE_TAG}"
+          cosign attach sbom --sbom agent-runner-sbom.spdx.json "ghcr.io/divergedev/agent-runner:${RELEASE_TAG}"
       - name: Update floating v1 GitHub Action tag and branch
         if: "!contains(github.ref_name, '-')"
         env:

@@ -525,3 +525,117 @@ func TestVerifyCmd_GitHubStepSummaryAndAnnotations(t *testing.T) {
 		assert.Contains(t, md, "Remediation:")
 	})
 }
+
+func TestVerifyCmd_PreviewGroupMultipleServices(t *testing.T) {
+	t.Run("probes all service endpoints in PreviewGroup", func(t *testing.T) {
+		var frontendHits, ordersHits int
+		frontendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			frontendHits++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("frontend ok"))
+		}))
+		t.Cleanup(frontendSrv.Close)
+
+		ordersSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ordersHits++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("orders ok"))
+		}))
+		t.Cleanup(ordersSrv.Close)
+
+		pg := &divergeiov1alpha1.PreviewGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pg-pr-42",
+				Namespace: "default",
+			},
+			Spec: divergeiov1alpha1.PreviewGroupSpec{
+				Routing: divergeiov1alpha1.PreviewGroupRouting{
+					Mode:        "header",
+					HeaderKey:   "x-diverge-env",
+					HeaderValue: "pr-42",
+				},
+			},
+			Status: divergeiov1alpha1.PreviewGroupStatus{
+				Phase: divergeiov1alpha1.PreviewGroupPhaseRunning,
+				Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+					{Name: "frontend", EnvironmentName: "pg-pr-42-frontend", Phase: divergeiov1alpha1.PhaseRunning, URL: frontendSrv.URL},
+					{Name: "orders-api", EnvironmentName: "pg-pr-42-orders", Phase: divergeiov1alpha1.PhaseRunning, URL: ordersSrv.URL},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newVerifyTestScheme(t)).
+			WithObjects(pg).
+			Build()
+
+		app := &App{Namespace: "default", Client: fakeClient}
+		root := NewRootCmd(app)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"verify", "pg-pr-42", "/healthz", "--json"})
+
+		require.NoError(t, root.Execute())
+		assert.Equal(t, 1, frontendHits)
+		assert.Equal(t, 1, ordersHits)
+
+		var report VerifyReport
+		require.NoError(t, json.Unmarshal(out.Bytes(), &report))
+		assert.True(t, report.Passed)
+		assert.Equal(t, frontendSrv.URL+", "+ordersSrv.URL, report.TargetURL)
+		require.Len(t, report.Checks, 3)
+		assert.Equal(t, "workload-diagnostics", report.Checks[0].Name)
+		assert.Equal(t, "http-status:frontend:/healthz", report.Checks[1].Name)
+		assert.True(t, report.Checks[1].Passed)
+		assert.Equal(t, "http-status:orders-api:/healthz", report.Checks[2].Name)
+		assert.True(t, report.Checks[2].Passed)
+	})
+
+	t.Run("fails when a secondary service in PreviewGroup returns 500", func(t *testing.T) {
+		frontendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("frontend ok"))
+		}))
+		t.Cleanup(frontendSrv.Close)
+
+		ordersSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("orders error"))
+		}))
+		t.Cleanup(ordersSrv.Close)
+
+		pg := &divergeiov1alpha1.PreviewGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pg-pr-99",
+				Namespace: "default",
+			},
+			Status: divergeiov1alpha1.PreviewGroupStatus{
+				Phase: divergeiov1alpha1.PreviewGroupPhaseRunning,
+				Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+					{Name: "frontend", EnvironmentName: "pg-pr-99-frontend", Phase: divergeiov1alpha1.PhaseRunning, URL: frontendSrv.URL},
+					{Name: "orders-api", EnvironmentName: "pg-pr-99-orders", Phase: divergeiov1alpha1.PhaseRunning, URL: ordersSrv.URL},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newVerifyTestScheme(t)).
+			WithObjects(pg).
+			Build()
+
+		app := &App{Namespace: "default", Client: fakeClient}
+		root := NewRootCmd(app)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"verify", "pg-pr-99", "/healthz"})
+
+		err := root.Execute()
+		require.Error(t, err)
+		output := out.String()
+		assert.Contains(t, output, "http-status:frontend:/healthz")
+		assert.Contains(t, output, "http-status:orders-api:/healthz")
+		assert.Contains(t, output, "Verification FAILED (1/3 checks failed)")
+	})
+}

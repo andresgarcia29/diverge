@@ -169,19 +169,44 @@ func TestPodSandboxProvider_ProvisionAndSpec(t *testing.T) {
 	require.NotNil(t, pod.Spec.Volumes[2].Secret.Optional)
 	assert.True(t, *pod.Spec.Volumes[2].Secret.Optional)
 
-	// Verify DraftPR=false propagates DIVERGE_DRAFT_PR="false"
+	// Verify DraftPR=false propagates DIVERGE_DRAFT_PR="false" and allowed scm-secret injects DIVERGE_SCM_TOKEN
 	taskNoDraft := task.DeepCopy()
 	taskNoDraft.Name = "fix-checkout-ready"
 	taskNoDraft.Spec.DraftPR = false
+	taskNoDraft.Annotations["divergedev.com/scm-secret"] = "diverge-scm-token"
 	_, err = p.Provision(ctx, taskNoDraft)
 	require.NoError(t, err)
 	podNoDraft := &corev1.Pod{}
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "staging", Name: "sb-pod-fix-checkout-ready"}, podNoDraft))
 	envNoDraft := make(map[string]string, len(podNoDraft.Spec.Containers[0].Env))
-	for _, e := range podNoDraft.Spec.Containers[0].Env {
+	var scmEnvVar *corev1.EnvVar
+	for i := range podNoDraft.Spec.Containers[0].Env {
+		e := &podNoDraft.Spec.Containers[0].Env[i]
 		envNoDraft[e.Name] = e.Value
+		if e.Name == "DIVERGE_SCM_TOKEN" {
+			scmEnvVar = e
+		}
 	}
 	assert.Equal(t, "false", envNoDraft["DIVERGE_DRAFT_PR"])
+	require.NotNil(t, scmEnvVar)
+	require.NotNil(t, scmEnvVar.ValueFrom)
+	require.NotNil(t, scmEnvVar.ValueFrom.SecretKeyRef)
+	assert.Equal(t, "diverge-scm-token", scmEnvVar.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "token", scmEnvVar.ValueFrom.SecretKeyRef.Key)
+	require.NotNil(t, scmEnvVar.ValueFrom.SecretKeyRef.Optional)
+	assert.True(t, *scmEnvVar.ValueFrom.SecretKeyRef.Optional)
+
+	// Arbitrary secret names must be rejected and produce no DIVERGE_SCM_TOKEN entry
+	taskBadSecret := task.DeepCopy()
+	taskBadSecret.Name = "fix-checkout-bad-secret"
+	taskBadSecret.Annotations["divergedev.com/scm-secret"] = "arbitrary-namespace-secret"
+	_, err = p.Provision(ctx, taskBadSecret)
+	require.NoError(t, err)
+	podBadSecret := &corev1.Pod{}
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "staging", Name: "sb-pod-fix-checkout-bad-secret"}, podBadSecret))
+	for _, e := range podBadSecret.Spec.Containers[0].Env {
+		assert.NotEqual(t, "DIVERGE_SCM_TOKEN", e.Name)
+	}
 }
 
 func TestPodSandboxProvider_StatusTransitionsAndTeardown(t *testing.T) {

@@ -353,6 +353,18 @@ func BuildSandboxClaimSpec(task *v1alpha1.AgentTask) map[string]interface{} {
 	if guidance := strings.TrimSpace(task.Annotations["divergedev.com/guidance"]); guidance != "" {
 		envVars = append(envVars, map[string]interface{}{"name": "DIVERGE_GUIDANCE", "value": guidance})
 	}
+	if scmSecret := strings.TrimSpace(task.Annotations["divergedev.com/scm-secret"]); IsAllowedSCMSecretName(scmSecret) {
+		envVars = append(envVars, map[string]interface{}{
+			"name": "DIVERGE_SCM_TOKEN",
+			"valueFrom": map[string]interface{}{
+				"secretKeyRef": map[string]interface{}{
+					"name":     scmSecret,
+					"key":      "token",
+					"optional": true,
+				},
+			},
+		})
+	}
 
 	// Standalone pod template fallback with explicit resource bounds, ephemeral disk limits,
 	// NetworkPolicy isolation labels, and non-root security context.

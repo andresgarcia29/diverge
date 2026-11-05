@@ -546,7 +546,7 @@ func (r *Runner) gitHTTPAuthEnv() []string {
 		return nil
 	}
 	repoURL := strings.TrimSpace(r.Config.RepoURL)
-	if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "http://") {
+	if !strings.HasPrefix(strings.ToLower(repoURL), "https://") {
 		return nil
 	}
 	host, _, err := parseRepositoryCoordinates(repoURL)

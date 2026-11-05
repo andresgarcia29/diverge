@@ -211,9 +211,53 @@ func TestBuildSandboxClaimSpec(t *testing.T) {
 	longEnvMap := make(map[string]string, len(longEnvList))
 	for _, e := range longEnvList {
 		em := e.(map[string]interface{})
-		longEnvMap[em["name"].(string)] = em["value"].(string)
+		if val, ok := em["value"].(string); ok {
+			longEnvMap[em["name"].(string)] = val
+		}
 	}
 	assert.Equal(t, "false", longEnvMap["DIVERGE_DRAFT_PR"])
+
+	// 5. Verify divergedev.com/scm-secret injects DIVERGE_SCM_TOKEN only for allowed diverge-scm-* Secret names
+	taskSCM := &v1alpha1.AgentTask{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-scm",
+			Namespace: "staging",
+			Annotations: map[string]string{
+				"divergedev.com/scm-secret": "diverge-scm-token",
+			},
+		},
+	}
+	specSCM := BuildSandboxClaimSpec(taskSCM)
+	scmEnvList := specSCM["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})[0].(map[string]interface{})["env"].([]interface{})
+	var foundSCMEnv map[string]interface{}
+	for _, e := range scmEnvList {
+		em := e.(map[string]interface{})
+		if em["name"] == "DIVERGE_SCM_TOKEN" {
+			foundSCMEnv = em
+			break
+		}
+	}
+	require.NotNil(t, foundSCMEnv)
+	vf := foundSCMEnv["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})
+	assert.Equal(t, "diverge-scm-token", vf["name"])
+	assert.Equal(t, "token", vf["key"])
+	assert.Equal(t, true, vf["optional"])
+
+	taskBadSCM := &v1alpha1.AgentTask{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-bad-scm",
+			Namespace: "staging",
+			Annotations: map[string]string{
+				"divergedev.com/scm-secret": "arbitrary-secret",
+			},
+		},
+	}
+	specBadSCM := BuildSandboxClaimSpec(taskBadSCM)
+	badEnvList := specBadSCM["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})[0].(map[string]interface{})["env"].([]interface{})
+	for _, e := range badEnvList {
+		em := e.(map[string]interface{})
+		assert.NotEqual(t, "DIVERGE_SCM_TOKEN", em["name"])
+	}
 }
 
 func TestAgentSandboxProvider_SuspendAndResume(t *testing.T) {

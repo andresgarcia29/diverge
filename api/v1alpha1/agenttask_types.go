@@ -101,7 +101,7 @@ type AgentTaskSpec struct {
 	// Defaults to true for safety.
 	// +kubebuilder:default=true
 	// +optional
-	DraftPR bool `json:"draftPR"`
+	DraftPR bool `json:"draftPR,omitempty"`
 
 	// Suspended pauses the agent execution and scales compute to zero.
 	// +optional

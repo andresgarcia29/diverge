@@ -59,8 +59,32 @@ func SandboxPodName(taskName string) string {
 	return fmt.Sprintf("%s-%s", prefix, suffix)
 }
 
+// ptr returns a pointer to v.
 func ptr[T any](v T) *T {
 	return &v
+}
+
+// IsAllowedSCMSecretName reports whether a Secret name referenced by divergedev.com/scm-secret
+// matches the dedicated diverge-scm-* naming pattern, preventing arbitrary namespace Secret mounting.
+func IsAllowedSCMSecretName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || len(trimmed) > 63 {
+		return false
+	}
+	if trimmed != "diverge-scm-token" && !strings.HasPrefix(trimmed, "diverge-scm-") {
+		return false
+	}
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		isLowerOrDigit := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if !isLowerOrDigit && ch != '-' {
+			return false
+		}
+		if (i == 0 || i == len(trimmed)-1) && !isLowerOrDigit {
+			return false
+		}
+	}
+	return true
 }
 
 // Provision creates a hardened Kubernetes Pod for the AgentTask.
@@ -95,6 +119,7 @@ func (p *PodSandboxProvider) Provision(ctx context.Context, task *v1alpha1.Agent
 		{Name: "DIVERGE_REPO_URL", Value: task.Spec.Repository.URL},
 		{Name: "DIVERGE_BASE_BRANCH", Value: baseBranch},
 		{Name: "DIVERGE_WORKING_BRANCH", Value: task.Spec.Repository.WorkingBranch},
+		{Name: "DIVERGE_DRAFT_PR", Value: strconv.FormatBool(task.Spec.DraftPR)},
 		{Name: "DIVERGE_BUDGET_USD", Value: task.Spec.BudgetUSD},
 		{Name: "DIVERGE_MAX_ITERATIONS", Value: strconv.Itoa(int(task.Spec.MaxIterations))},
 		{Name: "DIVERGE_TOKEN_FILE", Value: "/etc/diverge/token/token"},
@@ -103,6 +128,18 @@ func (p *PodSandboxProvider) Provision(ctx context.Context, task *v1alpha1.Agent
 	}
 	if guidance := strings.TrimSpace(task.Annotations["divergedev.com/guidance"]); guidance != "" {
 		containerEnv = append(containerEnv, corev1.EnvVar{Name: "DIVERGE_GUIDANCE", Value: guidance})
+	}
+	if scmSecret := strings.TrimSpace(task.Annotations["divergedev.com/scm-secret"]); IsAllowedSCMSecretName(scmSecret) {
+		containerEnv = append(containerEnv, corev1.EnvVar{
+			Name: "DIVERGE_SCM_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: scmSecret},
+					Key:                  "token",
+					Optional:             ptr(true),
+				},
+			},
+		})
 	}
 
 	pod := &corev1.Pod{

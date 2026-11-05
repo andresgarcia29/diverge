@@ -77,6 +77,15 @@ func TestLoadConfigFromEnv_DefaultsAndCustomValues(t *testing.T) {
 		if cfg.WorkingBranch != "agent/fix-checkout" {
 			t.Errorf("WorkingBranch = %q, want %q", cfg.WorkingBranch, "agent/fix-checkout")
 		}
+		if !cfg.DraftPR {
+			t.Errorf("DraftPR = %v, want true", cfg.DraftPR)
+		}
+		if cfg.GitHubAPIURL != DefaultGitHubAPIURL {
+			t.Errorf("GitHubAPIURL = %q, want %q", cfg.GitHubAPIURL, DefaultGitHubAPIURL)
+		}
+		if cfg.GitLabAPIURL != DefaultGitLabAPIURL {
+			t.Errorf("GitLabAPIURL = %q, want %q", cfg.GitLabAPIURL, DefaultGitLabAPIURL)
+		}
 		if cfg.MaxIterations != DefaultMaxIterations {
 			t.Errorf("MaxIterations = %d, want %d", cfg.MaxIterations, DefaultMaxIterations)
 		}
@@ -749,4 +758,374 @@ func TestRunner_Run_TokenRotationAndLiveGuidance(t *testing.T) {
 	if strings.TrimSpace(string(guidanceData)) != "Switch to mock Redis client" {
 		t.Errorf("unexpected guidance file content: %q", string(guidanceData))
 	}
+}
+
+func TestRunner_Run_CreatesGitHubDraftPRAndReportsPRURL(t *testing.T) {
+	t.Setenv("DIVERGE_MACAROON_TOKEN", "inline-macaroon-token")
+
+	var (
+		meterReqs       []MeterRequest
+		ghPRBody        map[string]any
+		ghAuth          string
+		pushExecuted    bool
+		pushBeforePRReq bool
+		prRequestsCount int
+	)
+
+	meterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req MeterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode meter req: %v", err)
+		}
+		meterReqs = append(meterReqs, req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(MeterResponse{
+			Allowed:         true,
+			TotalTokensUsed: 2500,
+			TotalCostUSD:    0.05,
+			PRURL:           req.PRURL,
+		})
+	}))
+	defer meterSrv.Close()
+
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prRequestsCount++
+		pushBeforePRReq = pushExecuted
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/divergedev/shop/pulls" {
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+		}
+		ghAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&ghPRBody); err != nil {
+			t.Errorf("decode gh pr body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"html_url": "https://github.com/divergedev/shop/pull/42",
+		})
+	}))
+	defer ghSrv.Close()
+
+	mockExec := &mockCommandExecutor{
+		handler: func(_ int, cmd recordedCommand) (string, error) {
+			if cmd.Name == "git" && len(cmd.Args) >= 1 && cmd.Args[0] == "status" {
+				return " M pkg/checkout/handler.go\n", nil
+			}
+			if cmd.Name == "git" && len(cmd.Args) >= 1 && cmd.Args[0] == "push" {
+				pushExecuted = true
+			}
+			return "", nil
+		},
+	}
+
+	cfg := &Config{
+		TaskName:            "fix-checkout",
+		TaskNamespace:       "default",
+		Objective:           "Fix nil pointer in checkout",
+		RepoURL:             "https://github.com/divergedev/shop.git",
+		BaseBranch:          "main",
+		WorkingBranch:       "agent/fix-checkout",
+		DraftPR:             true,
+		SCMToken:            "ghs_test_token_123",
+		GitHubAPIURL:        ghSrv.URL,
+		MaxIterations:       2,
+		MeterURL:            meterSrv.URL,
+		WorkspaceDir:        "/workspace/shop",
+		AgentCommand:        "run-agent-step",
+		VerifyCommand:       "go test ./...",
+		Model:               "claude-3-7-sonnet",
+		TokensPerIteration:  2500,
+		CostPerIterationUSD: 0.05,
+	}
+
+	runner := &Runner{
+		Config:     cfg,
+		Exec:       mockExec,
+		HTTPClient: meterSrv.Client(),
+		Logger:     &bytes.Buffer{},
+	}
+
+	res, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Runner.Run returned unexpected error: %v", err)
+	}
+	if !res.Succeeded || !res.Committed || res.PRURL != "https://github.com/divergedev/shop/pull/42" {
+		t.Fatalf("unexpected RunResult: %+v", res)
+	}
+	if !pushExecuted || !pushBeforePRReq || prRequestsCount != 1 {
+		t.Fatalf("expected git push before 1 PR request; pushExecuted=%v pushBeforePRReq=%v prRequestsCount=%d", pushExecuted, pushBeforePRReq, prRequestsCount)
+	}
+	calls := mockExec.Calls()
+	var pushCall *recordedCommand
+	for i := range calls {
+		if calls[i].Name == "git" && len(calls[i].Args) > 0 && calls[i].Args[0] == "push" {
+			pushCall = &calls[i]
+			break
+		}
+	}
+	if pushCall == nil || !strings.Contains(strings.Join(pushCall.Env, "\n"), "GIT_CONFIG_KEY_0=http.extraHeader") {
+		t.Errorf("expected git push to receive GIT_CONFIG_KEY_0=http.extraHeader, got: %+v", pushCall)
+	}
+	if ghAuth != "Bearer ghs_test_token_123" {
+		t.Errorf("ghAuth = %q, want %q", ghAuth, "Bearer ghs_test_token_123")
+	}
+	if ghPRBody["draft"] != true || ghPRBody["head"] != "agent/fix-checkout" || ghPRBody["base"] != "main" {
+		t.Errorf("unexpected GitHub PR payload: %+v", ghPRBody)
+	}
+	if len(meterReqs) != 2 {
+		t.Fatalf("expected 2 meter requests (iteration + PRURL report), got %d: %+v", len(meterReqs), meterReqs)
+	}
+	if meterReqs[1].PRURL != "https://github.com/divergedev/shop/pull/42" || meterReqs[1].TokensUsed != 0 || meterReqs[1].CostUSD != 0 {
+		t.Errorf("unexpected PRURL meter report: %+v", meterReqs[1])
+	}
+
+	t.Run("push failure prevents PR creation", func(t *testing.T) {
+		var prHit bool
+		failGHSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			prHit = true
+			w.WriteHeader(http.StatusCreated)
+		}))
+		defer failGHSrv.Close()
+
+		failExec := &mockCommandExecutor{
+			handler: func(_ int, cmd recordedCommand) (string, error) {
+				if cmd.Name == "git" && len(cmd.Args) >= 1 && cmd.Args[0] == "status" {
+					return " M pkg/checkout/handler.go\n", nil
+				}
+				if cmd.Name == "git" && len(cmd.Args) >= 1 && cmd.Args[0] == "push" {
+					return "remote rejected", errors.New("exit status 1")
+				}
+				return "", nil
+			},
+		}
+
+		failCfg := *cfg
+		failCfg.GitHubAPIURL = failGHSrv.URL
+		failRunner := &Runner{
+			Config:     &failCfg,
+			Exec:       failExec,
+			HTTPClient: meterSrv.Client(),
+			Logger:     &bytes.Buffer{},
+		}
+
+		failRes, failErr := failRunner.Run(context.Background())
+		if failErr == nil || !strings.Contains(failErr.Error(), "git push") {
+			t.Fatalf("expected git push error, got: %v", failErr)
+		}
+		if failRes == nil || failRes.Succeeded {
+			t.Fatalf("expected failed RunResult, got: %+v", failRes)
+		}
+		if prHit {
+			t.Errorf("expected no PR request when git push fails")
+		}
+	})
+}
+
+func TestRunner_CreatePullRequest_GitLabAndIdempotentGitHub422(t *testing.T) {
+	t.Run("gitlab draft merge request", func(t *testing.T) {
+		var (
+			glPath  string
+			glToken string
+			glBody  map[string]any
+		)
+		glSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			glPath = r.URL.EscapedPath()
+			glToken = r.Header.Get("PRIVATE-TOKEN")
+			_ = json.NewDecoder(r.Body).Decode(&glBody)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"web_url": "https://gitlab.com/divergedev/sub/shop/-/merge_requests/19",
+			})
+		}))
+		defer glSrv.Close()
+
+		runner := &Runner{
+			Config: &Config{
+				TaskName:      "fix-gl",
+				Objective:     "Fix GitLab pipeline",
+				RepoURL:       "git@gitlab.com:divergedev/sub/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-gl",
+				DraftPR:       true,
+				GitLabToken:   "glpat-secret",
+				GitLabAPIURL:  glSrv.URL + "/api/v4",
+			},
+			HTTPClient: glSrv.Client(),
+		}
+
+		prURL, err := runner.CreatePullRequest(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prURL != "https://gitlab.com/divergedev/sub/shop/-/merge_requests/19" {
+			t.Errorf("prURL = %q", prURL)
+		}
+		if glPath != "/api/v4/projects/divergedev%2Fsub%2Fshop/merge_requests" {
+			t.Errorf("glPath = %q", glPath)
+		}
+		if glToken != "glpat-secret" {
+			t.Errorf("glToken = %q", glToken)
+		}
+		if glBody["title"] != "Draft: fix(fix-gl): Fix GitLab pipeline" {
+			t.Errorf("unexpected title: %v", glBody["title"])
+		}
+	})
+
+	t.Run("gitlab 409 existing MR fallback", func(t *testing.T) {
+		glSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"message":["Another open merge request already exists for this source branch: !19"]}`))
+				return
+			}
+			if r.Method == http.MethodGet && r.URL.EscapedPath() == "/api/v4/projects/divergedev%2Fshop/merge_requests" {
+				q := r.URL.Query()
+				if q.Get("source_branch") != "agent/fix-gl-existing" || q.Get("target_branch") != "main" || q.Get("state") != "opened" {
+					t.Errorf("unexpected GitLab MR lookup query: %s", r.URL.RawQuery)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"web_url": "https://gitlab.com/divergedev/shop/-/merge_requests/19"},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer glSrv.Close()
+
+		runner := &Runner{
+			Config: &Config{
+				TaskName:      "fix-gl-existing",
+				Objective:     "Reuse existing GitLab MR",
+				RepoURL:       "https://gitlab.com/divergedev/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-gl-existing",
+				DraftPR:       true,
+				SCMToken:      "glpat-secret",
+				GitLabAPIURL:  glSrv.URL + "/api/v4",
+			},
+			HTTPClient: glSrv.Client(),
+		}
+
+		prURL, err := runner.CreatePullRequest(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prURL != "https://gitlab.com/divergedev/shop/-/merge_requests/19" {
+			t.Errorf("prURL = %q, want %q", prURL, "https://gitlab.com/divergedev/shop/-/merge_requests/19")
+		}
+	})
+
+	t.Run("github 422 existing PR fallback", func(t *testing.T) {
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"message":"A pull request already exists"}]}`))
+				return
+			}
+			if r.Method == http.MethodGet && r.URL.Path == "/repos/divergedev/shop/pulls" {
+				q := r.URL.Query()
+				if q.Get("head") != "divergedev:agent/fix-existing" || q.Get("base") != "main" || q.Get("state") != "open" {
+					t.Errorf("unexpected pulls query: %s", r.URL.RawQuery)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"html_url": "https://github.com/divergedev/shop/pull/88"},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer ghSrv.Close()
+
+		runner := &Runner{
+			Config: &Config{
+				TaskName:      "fix-existing",
+				Objective:     "Reuse existing PR",
+				RepoURL:       "https://github.com/divergedev/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-existing",
+				DraftPR:       false,
+				SCMToken:      "ghs_token",
+				GitHubAPIURL:  ghSrv.URL,
+			},
+			HTTPClient: ghSrv.Client(),
+		}
+
+		prURL, err := runner.CreatePullRequest(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prURL != "https://github.com/divergedev/shop/pull/88" {
+			t.Errorf("prURL = %q, want %q", prURL, "https://github.com/divergedev/shop/pull/88")
+		}
+	})
+
+	t.Run("github.com ignores custom GitLabAPIURL and refuses self-hosted without explicit API URL", func(t *testing.T) {
+		ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"html_url": "https://github.com/divergedev/shop/pull/99",
+			})
+		}))
+		defer ghSrv.Close()
+
+		runner := &Runner{
+			Config: &Config{
+				TaskName:      "fix-gh-routing",
+				Objective:     "Always route github.com to GitHub",
+				RepoURL:       "https://github.com/divergedev/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-gh-routing",
+				DraftPR:       true,
+				GitHubToken:   "ghs_token",
+				GitLabToken:   "glpat_should_not_be_used",
+				GitHubAPIURL:  ghSrv.URL,
+				GitLabAPIURL:  "https://gitlab.internal.example.com/api/v4",
+			},
+			HTTPClient: ghSrv.Client(),
+		}
+
+		prURL, err := runner.CreatePullRequest(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prURL != "https://github.com/divergedev/shop/pull/99" {
+			t.Errorf("prURL = %q, want %q", prURL, "https://github.com/divergedev/shop/pull/99")
+		}
+
+		selfHostedGH := &Runner{
+			Config: &Config{
+				TaskName:      "fix-ghe",
+				Objective:     "Reject default API URL for self-hosted GitHub",
+				RepoURL:       "https://ghe.internal.example.com/divergedev/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-ghe",
+				SCMToken:      "ghs_token",
+				GitHubAPIURL:  DefaultGitHubAPIURL,
+			},
+		}
+		if _, err := selfHostedGH.CreatePullRequest(context.Background()); err == nil {
+			t.Errorf("expected error when sending self-hosted repo SCM token to default GitHub API")
+		}
+
+		selfHostedGL := &Runner{
+			Config: &Config{
+				TaskName:      "fix-self-gl",
+				Objective:     "Reject default API URL for self-hosted GitLab",
+				RepoURL:       "https://gitlab.internal.example.com/divergedev/shop.git",
+				BaseBranch:    "main",
+				WorkingBranch: "agent/fix-self-gl",
+				SCMToken:      "glpat_token",
+				GitLabAPIURL:  DefaultGitLabAPIURL,
+			},
+		}
+		if _, err := selfHostedGL.CreatePullRequest(context.Background()); err == nil {
+			t.Errorf("expected error when sending self-hosted GitLab repo SCM token to default GitLab API")
+		}
+	})
 }

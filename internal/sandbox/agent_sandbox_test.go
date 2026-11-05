@@ -112,6 +112,7 @@ func TestBuildSandboxClaimSpec(t *testing.T) {
 			Objective:     "Fix login regression",
 			BudgetUSD:     "8.00",
 			MaxIterations: 12,
+			DraftPR:       true,
 			Repository: v1alpha1.AgentTaskRepository{
 				URL:           "https://github.com/org/app",
 				BaseBranch:    "develop",
@@ -162,6 +163,7 @@ func TestBuildSandboxClaimSpec(t *testing.T) {
 	assert.Equal(t, "https://github.com/org/app", envMap["DIVERGE_REPO_URL"])
 	assert.Equal(t, "develop", envMap["DIVERGE_BASE_BRANCH"])
 	assert.Equal(t, "agent/fix-login", envMap["DIVERGE_WORKING_BRANCH"])
+	assert.Equal(t, "true", envMap["DIVERGE_DRAFT_PR"])
 	assert.Equal(t, "8.00", envMap["DIVERGE_BUDGET_USD"])
 	assert.Equal(t, "12", envMap["DIVERGE_MAX_ITERATIONS"])
 	assert.Equal(t, "/etc/diverge/token/token", envMap["DIVERGE_TOKEN_FILE"])

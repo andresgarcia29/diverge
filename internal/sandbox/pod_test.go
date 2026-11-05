@@ -52,6 +52,7 @@ func TestPodSandboxProvider_ProvisionAndSpec(t *testing.T) {
 			Objective:     "Fix race condition in checkout handler",
 			BudgetUSD:     "12.50",
 			MaxIterations: 7,
+			DraftPR:       true,
 			Repository: v1alpha1.AgentTaskRepository{
 				URL:           "https://github.com/example/shop.git",
 				BaseBranch:    "",
@@ -121,6 +122,7 @@ func TestPodSandboxProvider_ProvisionAndSpec(t *testing.T) {
 	assert.Equal(t, "https://github.com/example/shop.git", envMap["DIVERGE_REPO_URL"])
 	assert.Equal(t, "main", envMap["DIVERGE_BASE_BRANCH"])
 	assert.Equal(t, "agent/fix-checkout", envMap["DIVERGE_WORKING_BRANCH"])
+	assert.Equal(t, "true", envMap["DIVERGE_DRAFT_PR"])
 	assert.Equal(t, "12.50", envMap["DIVERGE_BUDGET_USD"])
 	assert.Equal(t, "7", envMap["DIVERGE_MAX_ITERATIONS"])
 	assert.Equal(t, "/etc/diverge/token/token", envMap["DIVERGE_TOKEN_FILE"])

@@ -337,6 +337,7 @@ func BuildSandboxClaimSpec(task *v1alpha1.AgentTask) map[string]interface{} {
 		map[string]interface{}{"name": "DIVERGE_REPO_URL", "value": task.Spec.Repository.URL},
 		map[string]interface{}{"name": "DIVERGE_BASE_BRANCH", "value": baseBranch},
 		map[string]interface{}{"name": "DIVERGE_WORKING_BRANCH", "value": task.Spec.Repository.WorkingBranch},
+		map[string]interface{}{"name": "DIVERGE_DRAFT_PR", "value": strconv.FormatBool(task.Spec.DraftPR)},
 		map[string]interface{}{"name": "DIVERGE_BUDGET_USD", "value": task.Spec.BudgetUSD},
 		map[string]interface{}{"name": "DIVERGE_MAX_ITERATIONS", "value": strconv.Itoa(int(task.Spec.MaxIterations))},
 		map[string]interface{}{"name": "DIVERGE_TOKEN_FILE", "value": "/etc/diverge/token/token"},
@@ -351,6 +352,18 @@ func BuildSandboxClaimSpec(task *v1alpha1.AgentTask) map[string]interface{} {
 	}
 	if guidance := strings.TrimSpace(task.Annotations["divergedev.com/guidance"]); guidance != "" {
 		envVars = append(envVars, map[string]interface{}{"name": "DIVERGE_GUIDANCE", "value": guidance})
+	}
+	if scmSecret := strings.TrimSpace(task.Annotations["divergedev.com/scm-secret"]); scmSecret != "" {
+		envVars = append(envVars, map[string]interface{}{
+			"name": "DIVERGE_SCM_TOKEN",
+			"valueFrom": map[string]interface{}{
+				"secretKeyRef": map[string]interface{}{
+					"name":     scmSecret,
+					"key":      "token",
+					"optional": true,
+				},
+			},
+		})
 	}
 
 	// Standalone pod template fallback with explicit resource bounds, ephemeral disk limits,

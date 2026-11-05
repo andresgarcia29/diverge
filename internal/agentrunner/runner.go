@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,8 @@ const (
 	DefaultModel               = "claude-3-7-sonnet"
 	DefaultTokensPerIteration  = int64(2500)
 	DefaultCostPerIterationUSD = 0.05
+	DefaultGitHubAPIURL        = "https://api.github.com"
+	DefaultGitLabAPIURL        = "https://gitlab.com/api/v4"
 )
 
 var (
@@ -49,6 +52,10 @@ type Config struct {
 	RepoURL             string
 	BaseBranch          string
 	WorkingBranch       string
+	DraftPR             bool
+	SCMToken            string
+	GitHubAPIURL        string
+	GitLabAPIURL        string
 	BudgetUSD           string
 	MaxIterations       int
 	TokenFile           string
@@ -101,6 +108,39 @@ func LoadConfigFromEnv(getenv func(string) string) (*Config, error) {
 	workingBranch := strings.TrimSpace(getenv("DIVERGE_WORKING_BRANCH"))
 	if workingBranch == "" {
 		workingBranch = fmt.Sprintf("agent/%s", taskName)
+	}
+
+	draftPR := true
+	if rawDraft := strings.TrimSpace(getenv("DIVERGE_DRAFT_PR")); rawDraft != "" {
+		parsed, err := strconv.ParseBool(rawDraft)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DIVERGE_DRAFT_PR %q: %w", rawDraft, err)
+		}
+		draftPR = parsed
+	}
+
+	scmToken := strings.TrimSpace(getenv("DIVERGE_SCM_TOKEN"))
+	if scmToken == "" {
+		scmToken = strings.TrimSpace(getenv("GITHUB_TOKEN"))
+	}
+	if scmToken == "" {
+		scmToken = strings.TrimSpace(getenv("GITLAB_TOKEN"))
+	}
+
+	githubAPIURL := strings.TrimSpace(getenv("DIVERGE_GITHUB_API_URL"))
+	if githubAPIURL == "" {
+		githubAPIURL = strings.TrimSpace(getenv("GITHUB_API_URL"))
+	}
+	if githubAPIURL == "" {
+		githubAPIURL = DefaultGitHubAPIURL
+	}
+
+	gitlabAPIURL := strings.TrimSpace(getenv("DIVERGE_GITLAB_API_URL"))
+	if gitlabAPIURL == "" {
+		gitlabAPIURL = strings.TrimSpace(getenv("CI_API_V4_URL"))
+	}
+	if gitlabAPIURL == "" {
+		gitlabAPIURL = DefaultGitLabAPIURL
 	}
 
 	maxIterations := DefaultMaxIterations
@@ -169,6 +209,10 @@ func LoadConfigFromEnv(getenv func(string) string) (*Config, error) {
 		RepoURL:             repoURL,
 		BaseBranch:          baseBranch,
 		WorkingBranch:       workingBranch,
+		DraftPR:             draftPR,
+		SCMToken:            scmToken,
+		GitHubAPIURL:        githubAPIURL,
+		GitLabAPIURL:        gitlabAPIURL,
 		BudgetUSD:           strings.TrimSpace(getenv("DIVERGE_BUDGET_USD")),
 		MaxIterations:       maxIterations,
 		TokenFile:           tokenFile,
@@ -195,6 +239,7 @@ type MeterRequest struct {
 	Model      string  `json:"model"`
 	TokensUsed int64   `json:"tokensUsed"`
 	CostUSD    float64 `json:"costUSD"`
+	PRURL      string  `json:"prUrl,omitempty"`
 }
 
 // MeterResponse matches internal/server.LLMMeterResponse JSON schema returned by POST /api/v1/agenttask/meter.
@@ -208,6 +253,7 @@ type MeterResponse struct {
 	MaxIterations   int32   `json:"maxIterations,omitempty"`
 	Guidance        string  `json:"guidance,omitempty"`
 	PreviewURL      string  `json:"previewUrl,omitempty"`
+	PRURL           string  `json:"prUrl,omitempty"`
 }
 
 // CommandExecutor abstracts external command execution for testability.
@@ -240,6 +286,7 @@ type RunResult struct {
 	Iterations      int
 	Committed       bool
 	WorkingBranch   string
+	PRURL           string
 	TotalTokensUsed int64
 	TotalCostUSD    float64
 }
@@ -315,26 +362,60 @@ func (r *Runner) ReportUsage(ctx context.Context, token, model string, tokensUse
 func (r *Runner) ReportUsageForIteration(ctx context.Context, iter int, token, model string, tokensUsed int64, costUSD float64) (*MeterResponse, error) {
 	var reqID string
 	if iter > 0 && r.Config != nil && r.Config.TaskName != "" {
-		if r.runID == "" {
-			if r.Config.RunID != "" {
-				r.runID = r.Config.RunID
-			} else {
-				nonce := make([]byte, 16)
-				if _, err := rand.Read(nonce); err != nil {
-					return nil, fmt.Errorf("generate run ID: %w", err)
-				}
-				r.runID = hex.EncodeToString(nonce)
-			}
+		runID, err := r.ensureRunID()
+		if err != nil {
+			return nil, err
 		}
-		reqID = fmt.Sprintf("%s-%s-iter-%d", r.Config.TaskName, r.runID, iter)
+		reqID = fmt.Sprintf("%s-%s-iter-%d", r.Config.TaskName, runID, iter)
 	}
-	payload := MeterRequest{
+	return r.postMeterRequest(ctx, token, MeterRequest{
 		RequestID:  reqID,
 		Iteration:  int32(iter),
 		Model:      model,
 		TokensUsed: tokensUsed,
 		CostUSD:    costUSD,
+	})
+}
+
+// ReportPullRequest reports a created Pull Request / Merge Request URL to the Diverge metering endpoint.
+func (r *Runner) ReportPullRequest(ctx context.Context, iter int, token, prURL string) (*MeterResponse, error) {
+	var reqID string
+	if r.Config != nil && r.Config.TaskName != "" {
+		runID, err := r.ensureRunID()
+		if err != nil {
+			return nil, err
+		}
+		reqID = fmt.Sprintf("%s-%s-pr", r.Config.TaskName, runID)
 	}
+	model := ""
+	if r.Config != nil {
+		model = r.Config.Model
+	}
+	return r.postMeterRequest(ctx, token, MeterRequest{
+		RequestID: reqID,
+		Iteration: int32(iter),
+		Model:     model,
+		PRURL:     prURL,
+	})
+}
+
+func (r *Runner) ensureRunID() (string, error) {
+	if r.runID != "" {
+		return r.runID, nil
+	}
+	if r.Config != nil && r.Config.RunID != "" {
+		r.runID = r.Config.RunID
+		return r.runID, nil
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generate run ID: %w", err)
+	}
+	r.runID = hex.EncodeToString(nonce)
+	return r.runID, nil
+}
+
+func (r *Runner) postMeterRequest(ctx context.Context, token string, payload MeterRequest) (*MeterResponse, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal meter request: %w", err)
@@ -371,6 +452,210 @@ func (r *Runner) ReportUsageForIteration(ctx context.Context, iter int, token, m
 	}
 
 	return &meterResp, nil
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	if len(s) > 120 {
+		return s[:120]
+	}
+	return s
+}
+
+func parseRepositoryCoordinates(rawURL string) (host string, repoPath string, err error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", "", errors.New("repository URL is empty")
+	}
+
+	// Handle SCP-like SSH syntax: git@github.com:owner/repo.git
+	if !strings.Contains(trimmed, "://") && strings.Contains(trimmed, ":") {
+		parts := strings.SplitN(trimmed, ":", 2)
+		hostPart := parts[0]
+		if at := strings.LastIndex(hostPart, "@"); at >= 0 {
+			hostPart = hostPart[at+1:]
+		}
+		pathPart := strings.Trim(parts[1], "/")
+		pathPart = strings.TrimSuffix(pathPart, ".git")
+		if hostPart == "" || !strings.Contains(pathPart, "/") {
+			return "", "", fmt.Errorf("cannot extract repository path from %q", rawURL)
+		}
+		return hostPart, pathPart, nil
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return "", "", fmt.Errorf("invalid repository URL %q", rawURL)
+	}
+	pathPart := strings.Trim(parsed.Path, "/")
+	pathPart = strings.TrimSuffix(pathPart, ".git")
+	if !strings.Contains(pathPart, "/") {
+		return "", "", fmt.Errorf("cannot extract owner/repo from %q", rawURL)
+	}
+	return parsed.Hostname(), pathPart, nil
+}
+
+// CreatePullRequest opens a Pull Request (GitHub) or Merge Request (GitLab) for WorkingBranch -> BaseBranch
+// when SCMToken is configured. If SCMToken is empty, it returns ("", nil).
+func (r *Runner) CreatePullRequest(ctx context.Context) (string, error) {
+	if r.Config == nil {
+		return "", errors.New("runner config is nil")
+	}
+	scmToken := strings.TrimSpace(r.Config.SCMToken)
+	if scmToken == "" {
+		return "", nil
+	}
+
+	host, repoPath, err := parseRepositoryCoordinates(r.Config.RepoURL)
+	if err != nil {
+		return "", err
+	}
+
+	baseBranch := strings.TrimSpace(r.Config.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = DefaultBaseBranch
+	}
+
+	title := fmt.Sprintf("fix(%s): %s", r.Config.TaskName, firstLine(r.Config.Objective))
+	body := fmt.Sprintf(
+		"Automated pull request created by **Diverge Agent** for task `%s`.\n\n### Objective\n%s\n",
+		r.Config.TaskName,
+		strings.TrimSpace(r.Config.Objective),
+	)
+
+	isGitLab := strings.Contains(strings.ToLower(host), "gitlab") ||
+		(strings.TrimSpace(r.Config.GitLabAPIURL) != "" && strings.TrimSpace(r.Config.GitLabAPIURL) != DefaultGitLabAPIURL)
+
+	if isGitLab {
+		return r.createGitLabMergeRequest(ctx, scmToken, repoPath, baseBranch, title, body)
+	}
+	return r.createGitHubPullRequest(ctx, scmToken, repoPath, baseBranch, title, body)
+}
+
+func (r *Runner) createGitHubPullRequest(ctx context.Context, scmToken, repoPath, baseBranch, title, body string) (string, error) {
+	apiBase := strings.TrimRight(strings.TrimSpace(r.Config.GitHubAPIURL), "/")
+	if apiBase == "" {
+		apiBase = DefaultGitHubAPIURL
+	}
+
+	payload := map[string]any{
+		"title": title,
+		"head":  r.Config.WorkingBranch,
+		"base":  baseBranch,
+		"body":  body,
+		"draft": r.Config.DraftPR,
+	}
+	rawBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal GitHub PR request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/repos/%s/pulls", apiBase, repoPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawBody))
+	if err != nil {
+		return "", fmt.Errorf("create GitHub PR request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+scmToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("post GitHub PR: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		var prResp struct {
+			HTMLURL string `json:"html_url"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&prResp); err != nil {
+			return "", fmt.Errorf("decode GitHub PR response: %w", err)
+		}
+		return strings.TrimSpace(prResp.HTMLURL), nil
+	}
+
+	// If a PR already exists for this branch (422 Unprocessable Entity), look it up idempotently.
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		owner := strings.SplitN(repoPath, "/", 2)[0]
+		q := url.Values{}
+		q.Set("head", fmt.Sprintf("%s:%s", owner, r.Config.WorkingBranch))
+		q.Set("base", baseBranch)
+		q.Set("state", "open")
+		listReq, listErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
+		if listErr == nil {
+			listReq.Header.Set("Authorization", "Bearer "+scmToken)
+			listReq.Header.Set("Accept", "application/vnd.github+json")
+			if listResp, doErr := r.httpClient().Do(listReq); doErr == nil {
+				defer func() { _ = listResp.Body.Close() }()
+				if listResp.StatusCode == http.StatusOK {
+					var existing []struct {
+						HTMLURL string `json:"html_url"`
+					}
+					if json.NewDecoder(listResp.Body).Decode(&existing) == nil && len(existing) > 0 && strings.TrimSpace(existing[0].HTMLURL) != "" {
+						return strings.TrimSpace(existing[0].HTMLURL), nil
+					}
+				}
+			}
+		}
+	}
+
+	errData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return "", fmt.Errorf("GitHub PR creation returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errData)))
+}
+
+func (r *Runner) createGitLabMergeRequest(ctx context.Context, scmToken, repoPath, baseBranch, title, body string) (string, error) {
+	apiBase := strings.TrimRight(strings.TrimSpace(r.Config.GitLabAPIURL), "/")
+	if apiBase == "" {
+		apiBase = DefaultGitLabAPIURL
+	}
+
+	mrTitle := title
+	if r.Config.DraftPR && !strings.HasPrefix(strings.ToLower(mrTitle), "draft:") {
+		mrTitle = "Draft: " + mrTitle
+	}
+
+	payload := map[string]any{
+		"source_branch": r.Config.WorkingBranch,
+		"target_branch": baseBranch,
+		"title":         mrTitle,
+		"description":   body,
+	}
+	rawBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal GitLab MR request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/projects/%s/merge_requests", apiBase, url.PathEscape(repoPath))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawBody))
+	if err != nil {
+		return "", fmt.Errorf("create GitLab MR request: %w", err)
+	}
+	req.Header.Set("PRIVATE-TOKEN", scmToken)
+	req.Header.Set("Authorization", "Bearer "+scmToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("post GitLab MR: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		var mrResp struct {
+			WebURL string `json:"web_url"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&mrResp); err != nil {
+			return "", fmt.Errorf("decode GitLab MR response: %w", err)
+		}
+		return strings.TrimSpace(mrResp.WebURL), nil
+	}
+
+	errData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return "", fmt.Errorf("GitLab MR creation returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errData)))
 }
 
 // ensureGitExcludeGuidance appends guidance file patterns to .git/info/exclude when a .git directory exists
@@ -543,6 +828,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		}
 
 		statusOut := strings.TrimSpace(statusRaw)
+		var prURL string
 		if statusOut != "" {
 			if _, err := exec.Run(ctx, r.Config.WorkspaceDir, nil, "git", "add", "-A"); err != nil {
 				return failedResult(), fmt.Errorf("git add: %w", err)
@@ -554,6 +840,17 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 			if _, err := exec.Run(ctx, r.Config.WorkspaceDir, nil, "git", "push", "-u", "origin", r.Config.WorkingBranch); err != nil {
 				return failedResult(), fmt.Errorf("git push: %w", err)
 			}
+
+			createdPRURL, prErr := r.CreatePullRequest(ctx)
+			if prErr != nil {
+				r.logf("warning: failed to create pull request: %v", prErr)
+			} else if createdPRURL != "" {
+				prURL = createdPRURL
+				r.logf("created pull request: %s", prURL)
+				if _, reportErr := r.ReportPullRequest(ctx, iter, token, prURL); reportErr != nil {
+					r.logf("warning: failed to report pull request URL to metering server: %v", reportErr)
+				}
+			}
 		}
 
 		return &RunResult{
@@ -561,6 +858,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 			Iterations:      iter,
 			Committed:       statusOut != "",
 			WorkingBranch:   r.Config.WorkingBranch,
+			PRURL:           prURL,
 			TotalTokensUsed: lastTokens,
 			TotalCostUSD:    lastCost,
 		}, nil

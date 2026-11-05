@@ -591,3 +591,65 @@ func TestLLMMeterHandler_RejectsSuspendedOrTerminalTask(t *testing.T) {
 	assert.False(t, resp.Allowed)
 	assert.True(t, resp.Suspended)
 }
+
+func TestLLMMeterHandler_PRURLReporting(t *testing.T) {
+	ctx := context.Background()
+	crdClient, verifier, store, handler := setupLLMMeterTest(t)
+
+	task := &v1alpha1.AgentTask{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-pr-report",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.AgentTaskSpec{
+			Objective:    "Report created PR URL",
+			BudgetUSD:    "5.00",
+			Capabilities: []string{"claude-sonnet-4*"},
+			Repository: v1alpha1.AgentTaskRepository{
+				URL: "https://github.com/divergedev/diverge",
+			},
+		},
+	}
+	require.NoError(t, crdClient.Create(ctx, task))
+	task.Status.Phase = v1alpha1.AgentTaskPhaseActive
+	require.NoError(t, crdClient.Status().Update(ctx, task))
+
+	token := mintTestMeterToken(t, verifier, store, pkgauth.Claims{
+		TaskID:        "task-pr-report",
+		Namespace:     "default",
+		AllowedModels: []string{"claude-sonnet-4*"},
+		MaxCostUSD:    5.00,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	})
+
+	// 1. Invalid PR URL rejected with 400 Bad Request
+	badBody, _ := json.Marshal(LLMMeterRequest{
+		PRURL: "ftp://invalid-scheme.example.com/pr/1",
+	})
+	badReq := httptest.NewRequest(http.MethodPost, "/api/v1/agenttask/meter", bytes.NewReader(badBody))
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	badRec := httptest.NewRecorder()
+	handler.ServeHTTP(badRec, badReq)
+	require.Equal(t, http.StatusBadRequest, badRec.Code)
+
+	// 2. Valid zero-cost PR URL report updates status.prURL on AgentTask
+	prBody, _ := json.Marshal(LLMMeterRequest{
+		RequestID: "task-pr-report-pr",
+		Iteration: 1,
+		PRURL:     "https://github.com/divergedev/diverge/pull/42",
+	})
+	prReq := httptest.NewRequest(http.MethodPost, "/api/v1/agenttask/meter", bytes.NewReader(prBody))
+	prReq.Header.Set("Authorization", "Bearer "+token)
+	prRec := httptest.NewRecorder()
+	handler.ServeHTTP(prRec, prReq)
+	require.Equal(t, http.StatusOK, prRec.Code)
+
+	var resp LLMMeterResponse
+	require.NoError(t, json.NewDecoder(prRec.Body).Decode(&resp))
+	assert.True(t, resp.Allowed)
+	assert.Equal(t, "https://github.com/divergedev/diverge/pull/42", resp.PRURL)
+
+	var updated v1alpha1.AgentTask
+	require.NoError(t, crdClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "task-pr-report"}, &updated))
+	assert.Equal(t, "https://github.com/divergedev/diverge/pull/42", updated.Status.PRURL)
+}

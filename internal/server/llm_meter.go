@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ type LLMMeterRequest struct {
 	Model      string  `json:"model"`
 	TokensUsed int64   `json:"tokensUsed"`
 	CostUSD    float64 `json:"costUSD"`
+	PRURL      string  `json:"prUrl,omitempty"`
 }
 
 // LLMMeterResponse is returned by POST /api/v1/agenttask/meter.
@@ -47,6 +49,7 @@ type LLMMeterResponse struct {
 	MaxIterations   int32   `json:"maxIterations,omitempty"`
 	Guidance        string  `json:"guidance,omitempty"`
 	PreviewURL      string  `json:"previewUrl,omitempty"`
+	PRURL           string  `json:"prUrl,omitempty"`
 }
 
 // LLMMeterHandler enforces live cost, token, and model capability budgets for AgentTasks.
@@ -165,7 +168,20 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(claims.AllowedModels) > 0 {
+	trimmedPRURL := strings.TrimSpace(req.PRURL)
+	if trimmedPRURL != "" {
+		parsedPRURL, parseErr := url.Parse(trimmedPRURL)
+		if parseErr != nil || (parsedPRURL.Scheme != "http" && parsedPRURL.Scheme != "https") || parsedPRURL.Host == "" {
+			writeMeterJSON(w, http.StatusBadRequest, LLMMeterResponse{
+				Allowed: false,
+				Reason:  "invalid prUrl: must be a valid http or https URL",
+			})
+			return
+		}
+	}
+
+	isZeroCostPRReport := trimmedPRURL != "" && req.TokensUsed == 0 && req.CostUSD == 0 && strings.TrimSpace(req.Model) == ""
+	if len(claims.AllowedModels) > 0 && !isZeroCostPRReport {
 		if strings.TrimSpace(req.Model) == "" {
 			writeMeterJSON(w, http.StatusForbidden, LLMMeterResponse{
 				Allowed:   false,
@@ -225,6 +241,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		maxIterations  int32
 		guidance       string
 		previewURL     string
+		prURL          string
 		budgetExceeded bool
 		exceedReason   string
 		loadFailed     bool
@@ -248,6 +265,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		totalTokens = task.Status.TokensConsumed
 		curIteration = task.Status.Iteration
 		maxIterations = task.Spec.MaxIterations
+		prURL = task.Status.PRURL
 		if task.Annotations != nil {
 			guidance = strings.TrimSpace(task.Annotations["divergedev.com/guidance"])
 			previewURL = strings.TrimSpace(task.Annotations["divergedev.com/preview-url"])
@@ -294,6 +312,10 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		curIteration = task.Status.Iteration
+		if trimmedPRURL != "" {
+			task.Status.PRURL = trimmedPRURL
+			prURL = trimmedPRURL
+		}
 
 		budgetExceeded = false
 		hasSpecUSD := false
@@ -349,6 +371,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				MaxIterations:   maxIterations,
 				Guidance:        guidance,
 				PreviewURL:      previewURL,
+				PRURL:           prURL,
 			})
 			return
 		}
@@ -415,6 +438,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			MaxIterations:   maxIterations,
 			Guidance:        guidance,
 			PreviewURL:      previewURL,
+			PRURL:           prURL,
 		})
 		return
 	}
@@ -428,6 +452,7 @@ func (h *LLMMeterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		MaxIterations:   maxIterations,
 		Guidance:        guidance,
 		PreviewURL:      previewURL,
+		PRURL:           prURL,
 	})
 }
 

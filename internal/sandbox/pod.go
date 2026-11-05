@@ -95,6 +95,7 @@ func (p *PodSandboxProvider) Provision(ctx context.Context, task *v1alpha1.Agent
 		{Name: "DIVERGE_REPO_URL", Value: task.Spec.Repository.URL},
 		{Name: "DIVERGE_BASE_BRANCH", Value: baseBranch},
 		{Name: "DIVERGE_WORKING_BRANCH", Value: task.Spec.Repository.WorkingBranch},
+		{Name: "DIVERGE_DRAFT_PR", Value: strconv.FormatBool(task.Spec.DraftPR)},
 		{Name: "DIVERGE_BUDGET_USD", Value: task.Spec.BudgetUSD},
 		{Name: "DIVERGE_MAX_ITERATIONS", Value: strconv.Itoa(int(task.Spec.MaxIterations))},
 		{Name: "DIVERGE_TOKEN_FILE", Value: "/etc/diverge/token/token"},
@@ -103,6 +104,18 @@ func (p *PodSandboxProvider) Provision(ctx context.Context, task *v1alpha1.Agent
 	}
 	if guidance := strings.TrimSpace(task.Annotations["divergedev.com/guidance"]); guidance != "" {
 		containerEnv = append(containerEnv, corev1.EnvVar{Name: "DIVERGE_GUIDANCE", Value: guidance})
+	}
+	if scmSecret := strings.TrimSpace(task.Annotations["divergedev.com/scm-secret"]); scmSecret != "" {
+		containerEnv = append(containerEnv, corev1.EnvVar{
+			Name: "DIVERGE_SCM_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: scmSecret},
+					Key:                  "token",
+					Optional:             ptr(true),
+				},
+			},
+		})
 	}
 
 	pod := &corev1.Pod{

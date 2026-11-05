@@ -8,15 +8,12 @@ Complete guide to using Diverge with GitLab — from setup to production.
 - Container registry (GitLab Container Registry recommended)
 
 ## 1. Install Diverge
-Install the Diverge controller using Helm, passing in your GitLab-specific values.
+Install the Diverge controller using the official OCI Helm chart, passing in your GitLab-specific values:
 ```bash
-helm repo add diverge https://divergedev.github.io/diverge
-helm repo update
-helm install diverge diverge/diverge \
+helm install diverge oci://ghcr.io/divergedev/charts/diverge \
   --namespace diverge-system \
   --create-namespace \
-  -f gitlab-values.yaml \
-  --version 0.15.0
+  -f gitlab-values.yaml
 ```
 
 ## 2. Configure GitLab Webhook
@@ -55,6 +52,9 @@ services:
   frontend:
     paths:
       - apps/web/**
+    image:
+      repository: registry.example.com/frontend
+      tag_template: "mr-{{.MR}}"
 ```
 When an MR is opened or updated, Diverge creates an `Environment` matching the MR ID and routes header-based traffic specifically to the updated service.
 
@@ -94,7 +94,7 @@ Include the official Diverge GitLab CI/CD Component (`templates/preview/template
 
 ```yaml
 include:
-  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.15.0
+  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.19.0
     inputs:
       diverge_registry: "$CI_REGISTRY_IMAGE"
       diverge_base_url: "https://staging.example.com"

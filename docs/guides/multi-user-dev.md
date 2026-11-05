@@ -110,8 +110,12 @@ version: "1"
 services:
   order-api:
     paths: ["services/order-api/**"]
+    image:
+      repository: ghcr.io/acme/order-api
   payments:
     paths: ["services/payments/**"]
+    image:
+      repository: ghcr.io/acme/payments
 
 defaults:
   dev:

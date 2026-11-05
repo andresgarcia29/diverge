@@ -53,7 +53,7 @@ Documentation: [https://divergedev.com](https://divergedev.com)
   <img src="docs/assets/terminal-quickstart-demo.svg" alt="Diverge CLI Quickstart Demo" width="100%">
 </p>
 
-You can quickly test Diverge locally with the CLI:
+You can quickly test Diverge locally with the CLI (run inside your Git repository checkout with an `origin` remote configured):
 
 ```bash
 diverge preview create --name pr-42 --service my-app=ghcr.io/my-org/my-app:pr-42
@@ -151,13 +151,13 @@ Diverge takes security seriously. The platform features strict CRD OpenAPI valid
   <img src="docs/assets/architecture-overview.svg" alt="Diverge End-to-End Architecture Overview" width="100%">
 </p>
 
-Diverge consists of 6 core binaries and an embedded Web UI compiled and released via `goreleaser`:
+Diverge consists of 6 core binaries and an embedded Web UI (`diverge-controller`, `diverge-server`, `diverge-proxy`, `diverge-activator-proxy`, and `diverge` compiled via `goreleaser`, plus `cmd/agent-runner` packaged via `Dockerfile.agent-runner`):
 
 1.  **Controller (`diverge-controller`)**: The Kubernetes operator that watches `PreviewGroup`, `Environment`, and `AgentTask` Custom Resources (CRs), reconciles them, and provisions routing, databases, sandboxes, and GitOps resources.
 2.  **API Server & Web UI (`diverge-server`)**: ConnectRPC server (`server.enabled: true`) serving the embedded React Web Dashboard, OIDC/TokenReview/Macaroon authentication, real-time environment/log streaming, LLM metering (`POST /api/v1/agenttask/meter`), and local-to-cluster HTTP tunnels.
 3.  **Proxy (`diverge-proxy`)**: A reverse proxy that facilitates header-based L7 routing and `<diverge-toolbar>` preview banner injection.
-4.  **Activator (`activator-proxy`)**: A proxy for scale-to-zero workloads. Wakes up sleeping pods on the first request and seamlessly routes traffic once they are ready.
-5.  **Agent Runner (`diverge-agent-runner`)**: Reference autonomous coding agent entrypoint (`cmd/agent-runner`, `ghcr.io/divergedev/agent-runner`) executing metered build-verify-fix loops inside `AgentTask` sandboxes.
+4.  **Activator (`diverge-activator-proxy`)**: A proxy for scale-to-zero workloads. Wakes up sleeping pods on the first request and seamlessly routes traffic once they are ready.
+5.  **Agent Runner (`diverge-agent-runner`)**: Reference autonomous coding agent entrypoint (`cmd/agent-runner`, packaged via `Dockerfile.agent-runner` as `ghcr.io/divergedev/agent-runner`) executing metered build-verify-fix loops inside `AgentTask` sandboxes.
 6.  **CLI & MCP Server (`diverge`)**: Terminal CLI and stdio Model Context Protocol (`diverge mcp`) server for AI agents and IDEs.
 
 ## PreviewGroup Example

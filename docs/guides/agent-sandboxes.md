@@ -97,7 +97,7 @@ agent:
 
 ```bash
 # Submit an autonomous task from your terminal
-diverge task create "Diagnose and fix N+1 query in /api/v1/checkout" --budget 5.00 --base-branch main
+diverge task create "Diagnose and fix N+1 query in /api/v1/checkout" --name fix-checkout-latency --budget 5.00 --base-branch main
 
 # List tasks, inspect status, or stream live sandbox logs
 diverge task list
@@ -125,6 +125,8 @@ metadata:
   annotations:
     divergedev.com/preview-enabled: "true"
     divergedev.com/preview-service: "checkout-api"
+    divergedev.com/preview-image: "ghcr.io/myorg/checkout-service:latest"
+    divergedev.com/preview-port: "8080"
 spec:
   objective: "Diagnose and fix N+1 query in /api/v1/checkout and verify in a preview environment"
   draftPR: true
@@ -140,7 +142,6 @@ spec:
     - gemini-2.5-pro
   sandbox:
     provider: agent-sandbox
-    templateRef: default
     timeoutSeconds: 1800
 ```
 
@@ -253,13 +254,13 @@ except LLMMeterError as err:
 ```
 
 ### Guardrails Enforced by `/api/v1/agenttask/meter`
-- **Idempotency (`requestId` & `status.lastMeterRequestIds`)**: Retried metering calls with the same `requestId` (tracked in a bounded 32-entry ring buffer on `AgentTaskStatus`) return current totals and live `guidance`/`previewUrl` without double-charging tokens, cost, or iterations.
-- **Model Restriction Enforcement (`403 Forbidden`)**: If the capability token has `allowed_models` caveats (`spec.capabilities`, supporting exact or prefix wildcards like `claude-*`), requests that omit `model` or specify a model not permitted by `allowed_models` are rejected immediately with `403 Forbidden`.
-- **Automatic Budget & Iteration Enforcement (`429 Too Many Requests`)**: When cumulative `totalCostUSD`, `totalTokensUsed`, or `iteration` exceeds the Macaroon caveat or `AgentTask` spec (`budgetUSD` / `budgetTokens` / `maxIterations`), `diverge-server`:
+- **Idempotency (`requestId` & `status.lastMeterRequestIds`)**: Each distinct metered LLM call must use a unique `requestId` (even within the same iteration); only retries of the same call should reuse a `requestId`. Retried calls whose `requestId` remains in the bounded 32-entry ring buffer (`status.lastMeterRequestIds` on `AgentTaskStatus`) return current totals and live `guidance`/`previewUrl` without double-charging tokens, cost, or iterations.
+- **Model Restriction Enforcement (`403 Forbidden`)**: When the capability token or task has `allowed_models` caveats (`spec.capabilities`, supporting exact or prefix wildcards like `claude-*`), requests that omit `model` or specify a model not permitted by `allowed_models` are rejected immediately with `403 Forbidden`.
+- **Automatic Budget & Iteration Enforcement (`429 Too Many Requests`)**: Positive `spec.budgetUSD` and `spec.budgetTokens` limits on the `AgentTask` take precedence over the Macaroon's `max_cost_usd` and `max_tokens` caveats (which serve as fallback limits when the spec fields are unset). When cumulative `totalCostUSD`, `totalTokensUsed`, or `iteration` exceeds the effective limit (`budgetUSD` / `budgetTokens` / `maxIterations`), `diverge-server`:
   1. Transitions the `AgentTask` status phase to `Paused`.
   2. Sets `spec.suspended = true`.
   3. Revokes the capability token in `diverge-agenttask-tokens`.
-  4. Returns `429 Too Many Requests` with `{"allowed": false, "suspended": true, "reason": "budget exceeded", ...}`.
+  4. Returns `429 Too Many Requests` with `{"allowed": false, "suspended": true, "reason": "budget exceeded", ...}` (or `"reason": "max iterations exceeded"` when `iteration > spec.maxIterations`).
 
 ---
 

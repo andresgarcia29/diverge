@@ -108,7 +108,7 @@ You can test header-routed preview environments directly in any browser—**with
    ```text
    http://localhost:8080/?_diverge_env=pr-101
    ```
-2. `diverge-proxy` automatically sets an `HttpOnly` session cookie (`Set-Cookie: _diverge_env=pr-101; Path=/; SameSite=Lax`) and routes all subsequent page loads, static assets, `fetch`/XHR requests, and WebSockets to `pr-101` (and injects the floating preview environment switcher if `previewBanner.enabled=true`).
+2. `diverge-proxy` automatically sets an `HttpOnly` session cookie (`Set-Cookie: diverge_env=pr-101; Path=/; SameSite=Lax`) and routes all subsequent page loads, static assets, `fetch`/XHR requests, and WebSockets to `pr-101` (and injects the floating preview environment switcher if `previewBanner.enabled=true`).
 3. To return to the shared baseline environment at any time, visit `http://localhost:8080/?_diverge_env=reset`.
 
 ### Web Dashboard, Doctor & MCP Server

@@ -58,7 +58,7 @@ key := sdk.ResolveRedisKey(ctx, "cart:user-42")
 (Equivalent helpers are available in Node.js via `resolveRedisKey` in `@divergedev/sdk` and Python via `resolve_redis_key` in `diverge-sdk`.)
 
 ### S3 / GCS / MinIO Object Storage Key Resolution
-When `protocol: s3`, `protocol: gcs`, or `protocol: minio` is configured in `asyncRoutes`, Diverge injects `DIVERGE_STORAGE_PREFIX` (`previews/<namespace>/<env>/` or `previews/<namespace>/<env>/<target>/`), `S3_KEY_PREFIX`, `AWS_S3_PREFIX`, and `GCS_KEY_PREFIX`, and purges the preview prefix upon environment teardown. Resolve object keys in application code using:
+When `protocol: s3`, `protocol: gcs`, or `protocol: minio` is configured in `asyncRoutes` (without custom `envVarMapping`), Diverge injects `DIVERGE_STORAGE_PREFIX` (`previews/<namespace>/<env>/` or `previews/<namespace>/<env>/<target>/`), `S3_KEY_PREFIX`, `AWS_S3_PREFIX`, and `GCS_KEY_PREFIX` (plus target-suffixed `DIVERGE_STORAGE_PREFIX_<TARGET>` variables when multiple storage routes are configured), and purges the preview prefix upon environment teardown when a storage bucket and endpoint (or `DIVERGE_GCS_TOKEN` for GCS) are configured on the controller. Resolve object keys in application code using `DIVERGE_STORAGE_PREFIX` / `S3_KEY_PREFIX` / `AWS_S3_PREFIX` / `GCS_KEY_PREFIX`, active request context, or `DIVERGE_ENV`:
 ```go
 objectKey := sdk.ResolveStorageKey(ctx, "avatars/user-1.png")
 ```

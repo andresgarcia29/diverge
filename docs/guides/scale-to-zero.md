@@ -26,7 +26,7 @@ sequenceDiagram
 
 Diverge supports two scale-to-zero mechanisms:
 1. **Built-in `activator-proxy`** (`activatorProxy.enabled: true`) — Uses a Kubernetes shared informer to track pod readiness in-memory, holds the HTTP request until the pod passes readiness probes, and injects `X-Preview-Env`.
-2. **KEDA HTTP Add-on (`HTTPScaledObject`) & Event-Driven `ScaledObject`** — Reconciles a KEDA `HTTPScaledObject` per `Environment` when `spec.serviceConfig.keda.enabled: true`, as well as KEDA `ScaledObject` triggers for `temporal` (task queue backlog) and `kafka` (consumer group lag) async workers (`pollingInterval`, `targetQueueSize`, `cooldownPeriod`).
+2. **KEDA HTTP Add-on (`HTTPScaledObject`)** — Reconciles a KEDA `HTTPScaledObject` (`http.keda.sh/v1alpha1`) per `Environment` when `spec.serviceConfig.keda.enabled: true` (`cooldownPeriod`, `minReplicas`, `maxReplicas`). For async workers (`kafka` or `temporal`), pair Diverge's preview topic/task-queue provisioning with a KEDA `ScaledObject` (see the [Async Routing Guide](https://divergedev.com/guides/async-routing/#4-keda-auto-scaling-integration)).
 
 ---
 

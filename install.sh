@@ -28,27 +28,39 @@ if [ "$TAG" = "latest" ] || [ -z "$TAG" ]; then
   exit 1
 fi
 
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/diverge_${OS}_${ARCH}.tar.gz"
+VERSION="${TAG#v}"
+ARCHIVE="diverge_${VERSION}_${OS}_${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$ARCHIVE"
 CHECKSUM_URL="https://github.com/$REPO/releases/download/$TAG/checksums.txt"
 
 echo "Downloading release $TAG..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -sL "$DOWNLOAD_URL" -o "$TMP_DIR/diverge.tar.gz"
-curl -sL "$CHECKSUM_URL" -o "$TMP_DIR/checksums.txt"
+curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE"
+curl -fsSL "$CHECKSUM_URL" -o "$TMP_DIR/checksums.txt"
 
 echo "Verifying checksum..."
 (
     cd "$TMP_DIR"
-    if ! grep "diverge_${OS}_${ARCH}.tar.gz" checksums.txt | sha256sum -c -; then
-        echo "Error: Checksum verification failed!" >&2
+    if command -v sha256sum >/dev/null 2>&1; then
+        if ! grep " ${ARCHIVE}\$" checksums.txt | sha256sum -c -; then
+            echo "Error: Checksum verification failed!" >&2
+            exit 1
+        fi
+    elif command -v shasum >/dev/null 2>&1; then
+        if ! grep " ${ARCHIVE}\$" checksums.txt | shasum -a 256 -c -; then
+            echo "Error: Checksum verification failed!" >&2
+            exit 1
+        fi
+    else
+        echo "Error: Neither sha256sum nor shasum found for checksum verification!" >&2
         exit 1
     fi
 )
 
 echo "Extracting..."
-tar -xzf "$TMP_DIR/diverge.tar.gz" -C "$TMP_DIR"
+tar -xzf "$TMP_DIR/$ARCHIVE" -C "$TMP_DIR"
 
 if [ ! -f "$TMP_DIR/diverge" ]; then
     error "Binary 'diverge' not found in archive."

@@ -305,8 +305,8 @@ Run a unified verification suite against a preview `Environment` or `PreviewGrou
 **Usage:** `diverge verify <env-name> [path-or-url] [flags]`
 
 **Flags:**
-- `--path` — HTTP path(s) to probe (repeatable, default: `["/"]`)
-- `--expect-status` — Expected HTTP status code (default: `0`, accepting any `2xx`/`3xx` status `< 400`)
+- `--path` — HTTP path(s) to probe (repeatable, default: `["/"]`; ignored if a positional `path-or-url` argument is provided)
+- `--expect-status` — Expected HTTP status code (default: `0`, accepting any final `2xx`/`3xx` status `< 400` after following redirects)
 - `--max-latency` — Maximum acceptable preview response latency (e.g., `500ms`)
 - `--body-contains` — Substring that must appear in the preview HTTP response body
 - `--compare-baseline` — Probe baseline (without preview routing headers) and verify HTTP status code parity
@@ -331,7 +331,7 @@ Create and manage spec-driven autonomous AI developer tasks (`AgentTask` CRDs) i
 
 **Subcommands:**
 - `diverge task init [--force]` — Scaffold `.diverge/agent.yaml` in your repository
-- `diverge task create "<objective>"` — Create an `AgentTask` (`--budget`, `--tokens`, `--iterations`, `--base-branch`, `--capabilities`, `--pool`, `--template`, `--dry-run`, `-o yaml|json`)
+- `diverge task create "<objective>"` — Create an `AgentTask` (`--name`, `--repo`, `--base-branch`, `--budget`, `--iterations`, `--capabilities`, `--pool`, `--template`, `--dry-run`, `-o/--output yaml|json`)
 - `diverge task list` — List `AgentTask` resources in the namespace
 - `diverge task status <name>` — Show phase (`Pending`, `Provisioning`, `Active`, `Pausing`, `Paused`, `Completed`, `Failed`), iteration progress, token/USD spend, and linked preview URL
 - `diverge task logs <name> [-f]` — Stream live execution logs from the sandbox pod

@@ -95,7 +95,7 @@ Slim builds are available with build tags: `no_knative`, `no_schema`, `no_tempor
 ## CI/CD
 
 - **GitHub Actions**: Workflows in `.github/workflows/` — `ci.yml` (build+test, lint, file-hygiene, helm-lint, check-generated, test-guardrails), `e2e.yml` (dual-cluster k3d tests), `release.yml` (GoReleaser on `v*` tags).
-- **GoReleaser**: Builds 6 binaries (`controller`, `server`, `proxy`, `activator-proxy`, `agent-runner`, `diverge` CLI) × 2 OS × 2 arch + slim variants. Dashboard built via `before.hooks` (buf generate + npm build). Docker images pushed to `ghcr.io/divergedev/diverge` and `ghcr.io/divergedev/agent-runner`.
+- **GoReleaser**: Builds 5 binaries (`diverge-controller`, `diverge-server`, `diverge-proxy`, `diverge-activator-proxy` on `linux`/`darwin` × `amd64`/`arm64`, and `diverge` CLI on `linux`/`darwin`/`windows` × `amd64`/`arm64`) + slim variants. Dashboard built via `before.hooks` (buf generate + npm build). Docker images pushed via GoReleaser to `ghcr.io/divergedev/diverge`, `ghcr.io/divergedev/activator-proxy`, and `ghcr.io/divergedev/diverge-cli`; `cmd/agent-runner` is built as a container image via `Dockerfile.agent-runner` (`ghcr.io/divergedev/agent-runner`).
 - **Pre-push guards**: `check-test-files` (every .go needs _test.go), `check-generated-stale` (runs make generate + git diff), `golangci-lint`, `go-test`.
 
 ## Supported Protocols

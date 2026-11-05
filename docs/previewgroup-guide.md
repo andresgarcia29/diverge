@@ -203,7 +203,7 @@ PreviewGroup natively integrates with KEDA to automatically scale idle preview s
 - **Temporal workers:** Via native KEDA `temporal` trigger. Scales based on task queue backlog.
 - **Kafka consumers:** Via native KEDA `kafka` trigger. Scales based on consumer group lag.
 
-Configure per-service autoscaling in the `keda` block of each service spec. See the [Autoscaling and Scale-to-Zero guide](guides/autoscaling-and-scale-to-zero.md) for details.
+Configure per-service autoscaling in the `keda` block of each service spec. See the [Scale-to-Zero & Activator Proxy guide](guides/scale-to-zero.md) for details.
 
 ## 13. Troubleshooting
 

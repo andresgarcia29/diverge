@@ -153,4 +153,4 @@ services:
 
 **Cold start:** Expect 15–60s latency (KEDA polling + pod scheduling + worker registration). Set `StartToCloseTimeout` ≥ 30s for preview workflows.
 
-See the [Autoscaling and Scale-to-Zero guide](autoscaling-and-scale-to-zero.md) for complete details.
+See the [Scale-to-Zero & Activator Proxy guide](scale-to-zero.md) for complete details.

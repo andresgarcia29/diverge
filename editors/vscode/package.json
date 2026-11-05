@@ -2,7 +2,7 @@
   "name": "diverge-vscode",
   "displayName": "Diverge Preview Environments",
   "description": "Preview environments, ephemeral load testing, visual diffs, and dev session management for Antigravity, VS Code, Cursor, and OpenCode.",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "publisher": "divergedev",
   "license": "Apache-2.0",
   "repository": {

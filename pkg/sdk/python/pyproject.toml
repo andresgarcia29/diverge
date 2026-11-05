@@ -1,6 +1,6 @@
 [project]
 name = "diverge-sdk"
-version = "0.18.0"
+version = "0.19.0"
 description = "Cross-language context propagation SDK for the diverge platform"
 readme = "README.md"
 requires-python = ">=3.9"

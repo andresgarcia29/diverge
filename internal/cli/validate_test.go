@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xeipuuv/gojsonschema"
+	"sigs.k8s.io/yaml"
 )
 
 func TestValidateValidConfig(t *testing.T) {
@@ -216,4 +219,110 @@ func TestValidatePrintSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out.Bytes(), &schema))
 	assert.Equal(t, "http://json-schema.org/draft-07/schema#", schema["$schema"])
 	assert.Equal(t, "Diverge Config", schema["title"])
+}
+
+// TestValidateDocsAndExampleConfigs validates examples/fullstack-demo/.diverge.yaml
+// and all .diverge.yaml fenced code blocks across README.md and docs/**/*.md against
+// the embedded JSON Schema.
+func TestValidateDocsAndExampleConfigs(t *testing.T) {
+	schemaBytes, err := schemaFS.ReadFile("schema/diverge-config.schema.json")
+	require.NoError(t, err)
+	schemaLoader := gojsonschema.NewBytesLoader(schemaBytes)
+
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	demoConfig := filepath.Join(repoRoot, "examples", "fullstack-demo", ".diverge.yaml")
+	demoData, err := os.ReadFile(demoConfig)
+	require.NoError(t, err)
+	demoJSON, err := yaml.YAMLToJSON(demoData)
+	require.NoError(t, err)
+	res, err := gojsonschema.Validate(schemaLoader, gojsonschema.NewBytesLoader(demoJSON))
+	require.NoError(t, err)
+	assert.True(t, res.Valid(), "examples/fullstack-demo/.diverge.yaml failed schema validation: %v", res.Errors())
+
+	var mdFiles []string
+	mdFiles = append(mdFiles, filepath.Join(repoRoot, "README.md"))
+	err = filepath.Walk(filepath.Join(repoRoot, "docs"), func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".md") {
+			mdFiles = append(mdFiles, path)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	checkedBlocks := 0
+	for _, mdFile := range mdFiles {
+		raw, err := os.ReadFile(mdFile)
+		require.NoError(t, err)
+		blocks := extractDivergeConfigYAMLBlocks(string(raw))
+		for idx, block := range blocks {
+			checkedBlocks++
+			jsonData, err := yaml.YAMLToJSON([]byte(block))
+			require.NoErrorf(t, err, "%s (block %d) invalid YAML", mdFile, idx+1)
+			result, err := gojsonschema.Validate(schemaLoader, gojsonschema.NewBytesLoader(jsonData))
+			require.NoErrorf(t, err, "%s (block %d) validation error", mdFile, idx+1)
+			if !result.Valid() {
+				var errMsgs []string
+				for _, e := range result.Errors() {
+					errMsgs = append(errMsgs, e.String())
+				}
+				t.Errorf("%s (block %d) failed .diverge.yaml schema validation:\n%s", mdFile, idx+1, strings.Join(errMsgs, "\n"))
+			}
+		}
+	}
+	assert.Greater(t, checkedBlocks, 0, "expected to validate at least one .diverge.yaml block in docs/")
+}
+
+// extractDivergeConfigYAMLBlocks extracts fenced YAML blocks from markdown that represent
+// a .diverge.yaml configuration file (identified by a top-level version key alongside
+// services, defaults, topology, notifications, or database, regardless of version value).
+func extractDivergeConfigYAMLBlocks(markdown string) []string {
+	var blocks []string
+	lines := strings.Split(markdown, "\n")
+	inYAML := false
+	var current []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inYAML {
+			if trimmed == "```yaml" || trimmed == "```yml" {
+				inYAML = true
+				current = nil
+			}
+			continue
+		}
+		if trimmed == "```" {
+			inYAML = false
+			block := strings.Join(current, "\n")
+			if isDivergeConfigYAMLBlock(block) {
+				blocks = append(blocks, block)
+			}
+			continue
+		}
+		current = append(current, line)
+	}
+	return blocks
+}
+
+// isDivergeConfigYAMLBlock returns true when a YAML snippet has a top-level "version:" key
+// and at least one top-level .diverge.yaml section ("services:", "defaults:", "topology:",
+// "notifications:", or legacy "database:").
+func isDivergeConfigYAMLBlock(block string) bool {
+	hasVersion := false
+	hasConfigMarker := false
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "version:") {
+			hasVersion = true
+		}
+		if strings.HasPrefix(line, "services:") ||
+			strings.HasPrefix(line, "defaults:") ||
+			strings.HasPrefix(line, "topology:") ||
+			strings.HasPrefix(line, "notifications:") ||
+			strings.HasPrefix(line, "database:") {
+			hasConfigMarker = true
+		}
+	}
+	return hasVersion && hasConfigMarker
 }

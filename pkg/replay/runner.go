@@ -254,6 +254,7 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 	switch tr := out.Transport.(type) {
 	case nil:
 		out.Transport = &http.Transport{
+			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 50,
 			IdleConnTimeout:     90 * time.Second,

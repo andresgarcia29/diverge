@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -125,13 +126,16 @@ func TestRunner_StripsRecordedPreviewHeadersFromBaselineAndChecksGRPCStatus(t *t
 			var msg []byte
 			msg = protowire.AppendTag(msg, 1, protowire.VarintType)
 			msg = protowire.AppendVarint(msg, 1)
+			framed := make([]byte, 5+len(msg))
+			binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg)))
+			copy(framed[5:], msg)
 			if isPreview {
 				w.Header().Set("Grpc-Status", "14") // UNAVAILABLE
 			} else {
 				w.Header().Set("Grpc-Status", "0")
 			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(msg)
+			_, _ = w.Write(framed)
 
 		case "/redirect-ssrf":
 			http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
@@ -187,6 +191,8 @@ func TestRunner_StripsRecordedPreviewHeadersFromBaselineAndChecksGRPCStatus(t *t
 	// Entry 1: identical protobuf messages, but preview returned Grpc-Status: 14
 	assert.False(t, report.Results[1].Passed)
 	assert.False(t, report.Results[1].StatusMatch)
+	require.Len(t, report.Results[1].ContractDiffs, 1)
+	assert.Equal(t, "grpc.status", report.Results[1].ContractDiffs[0].Path)
 	assert.Contains(t, report.Results[1].FailureReasons[0], "gRPC status mismatch")
 
 	// Entry 2: redirect to metadata IP blocked by CheckRedirect

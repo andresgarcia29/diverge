@@ -2,19 +2,24 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	divergeiov1alpha1 "github.com/divergedev/diverge/api/v1alpha1"
@@ -176,4 +181,265 @@ func TestReplayCmd_JSONAndProtobufPassAndFail(t *testing.T) {
 	require.NoError(t, json.Unmarshal(statusPassOut.Bytes(), &statusReport))
 	assert.True(t, statusReport.Passed)
 	assert.Contains(t, statusPassErr.String(), "Diverge Traffic Replay Passed: pr-42")
+}
+
+func TestSelectPreviewGroupServiceURL(t *testing.T) {
+	webAdminHash := fmt.Sprintf("%x", sha256.Sum256([]byte("pr-42/web-admin")))[:8]
+	webAdminChildEnv := "pg-pr-42-web-admin-" + webAdminHash
+
+	overlappingServices := []divergeiov1alpha1.PreviewGroupServiceStatus{
+		{
+			Name: "web",
+			URL:  "https://web-preview.example.com",
+		},
+		{
+			Name: "web-admin",
+			URL:  "https://web-admin-preview.example.com",
+		},
+	}
+
+	distinctServices := []divergeiov1alpha1.PreviewGroupServiceStatus{
+		{
+			Name: "api",
+			URL:  "https://api-preview.example.com",
+		},
+		{
+			Name: "worker",
+			URL:  "https://worker-preview.example.com",
+		},
+	}
+
+	tests := []struct {
+		name            string
+		services        []divergeiov1alpha1.PreviewGroupServiceStatus
+		explicitBaseURL string
+		externalURL     string
+		entries         []replay.RequestEntry
+		wantURL         string
+		wantAmbiguous   bool
+	}{
+		{
+			name: "single service with URL is unambiguous",
+			services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+				{Name: "api", URL: "https://api-preview.example.com"},
+			},
+			wantURL:       "https://api-preview.example.com",
+			wantAmbiguous: false,
+		},
+		{
+			name:            "distinct service matched by base URL host",
+			services:        distinctServices,
+			explicitBaseURL: "https://pr-42-api.example.com",
+			wantURL:         "https://api-preview.example.com",
+			wantAmbiguous:   false,
+		},
+		{
+			name:          "distinct service matched by absolute trace entry",
+			services:      distinctServices,
+			entries:       []replay.RequestEntry{{Method: "GET", Path: "https://worker.staging.example.com/health"}},
+			wantURL:       "https://worker-preview.example.com",
+			wantAmbiguous: false,
+		},
+		{
+			name:            "overlapping service names web and web-admin on pr-42-web-admin.example.com returns ambiguous",
+			services:        overlappingServices,
+			explicitBaseURL: "https://pr-42-web-admin.example.com",
+			wantURL:         "",
+			wantAmbiguous:   true,
+		},
+		{
+			name:            "overlapping service names resolved by URL template",
+			services:        overlappingServices,
+			explicitBaseURL: "https://web-admin.staging.example.com",
+			externalURL:     "https://{env}.staging.example.com",
+			wantURL:         "https://web-admin-preview.example.com",
+			wantAmbiguous:   false,
+		},
+		{
+			name:            "overlapping service names resolved by generated child environment name",
+			services:        overlappingServices,
+			explicitBaseURL: "https://" + webAdminChildEnv + ".preview.example.com",
+			wantURL:         "https://web-admin-preview.example.com",
+			wantAmbiguous:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotAmbiguous := selectPreviewGroupServiceURL(tt.services, tt.explicitBaseURL, tt.externalURL, tt.entries)
+			assert.Equal(t, tt.wantURL, gotURL)
+			assert.Equal(t, tt.wantAmbiguous, gotAmbiguous)
+		})
+	}
+}
+
+func TestResolveReplayRouting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, divergeiov1alpha1.AddToScheme(scheme))
+
+	relEntries := []replay.RequestEntry{{Method: "GET", Path: "/api/v1/items"}}
+	absEntries := []replay.RequestEntry{{Method: "GET", Path: "https://staging.example.com/api/v1/items"}}
+
+	subdomainEnv := &divergeiov1alpha1.Environment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sub-env", Namespace: "default"},
+		Spec: divergeiov1alpha1.EnvironmentSpec{
+			Routing: divergeiov1alpha1.EnvironmentRouting{Mode: "subdomain"},
+		},
+		Status: divergeiov1alpha1.EnvironmentStatus{
+			URL: "https://sub-env.preview.example.com",
+		},
+	}
+
+	subdomainEnvNoURL := &divergeiov1alpha1.Environment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sub-pending", Namespace: "default"},
+		Spec: divergeiov1alpha1.EnvironmentSpec{
+			Routing: divergeiov1alpha1.EnvironmentRouting{Mode: "subdomain"},
+		},
+	}
+
+	headerMultiPG := &divergeiov1alpha1.PreviewGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-header", Namespace: "default"},
+		Spec: divergeiov1alpha1.PreviewGroupSpec{
+			Routing: divergeiov1alpha1.PreviewGroupRouting{
+				Mode:        "header",
+				HeaderKey:   "x-custom-env",
+				HeaderValue: "pg-header-val",
+			},
+		},
+		Status: divergeiov1alpha1.PreviewGroupStatus{
+			Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+				{Name: "web", URL: "https://web.preview.example.com"},
+				{Name: "web-admin", URL: "https://web-admin.preview.example.com"},
+			},
+		},
+	}
+
+	subdomainMultiPG := &divergeiov1alpha1.PreviewGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-sub", Namespace: "default"},
+		Spec: divergeiov1alpha1.PreviewGroupSpec{
+			Routing: divergeiov1alpha1.PreviewGroupRouting{Mode: "subdomain"},
+		},
+		Status: divergeiov1alpha1.PreviewGroupStatus{
+			Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+				{Name: "web", URL: "https://web.preview.example.com"},
+				{Name: "web-admin", URL: "https://web-admin.preview.example.com"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		objects        []client.Object
+		nilApp         bool
+		envName        string
+		entries        []replay.RequestEntry
+		opts           replayOptions
+		wantBaseURL    string
+		wantPreviewURL string
+		wantHeaderKey  string
+		wantHeaderVal  string
+		wantErrSubstr  string
+	}{
+		{
+			name:           "subdomain environment with explicit base-url separates baseline and preview",
+			objects:        []client.Object{subdomainEnv},
+			envName:        "sub-env",
+			entries:        relEntries,
+			opts:           replayOptions{baseURL: "https://staging.example.com"},
+			wantBaseURL:    "https://staging.example.com",
+			wantPreviewURL: "https://sub-env.preview.example.com",
+			wantHeaderKey:  replay.DefaultHeaderKey,
+			wantHeaderVal:  "sub-env",
+		},
+		{
+			name:           "subdomain environment with absolute-URL trace does not require base-url",
+			objects:        []client.Object{subdomainEnv},
+			envName:        "sub-env",
+			entries:        absEntries,
+			opts:           replayOptions{},
+			wantBaseURL:    "",
+			wantPreviewURL: "https://sub-env.preview.example.com",
+			wantHeaderKey:  replay.DefaultHeaderKey,
+			wantHeaderVal:  "sub-env",
+		},
+		{
+			name:          "subdomain environment without base-url and relative trace fails",
+			objects:       []client.Object{subdomainEnv},
+			envName:       "sub-env",
+			entries:       relEntries,
+			opts:          replayOptions{},
+			wantErrSubstr: "pass --base-url <baseline-url>",
+		},
+		{
+			name:          "subdomain environment without published preview URL fails",
+			objects:       []client.Object{subdomainEnvNoURL},
+			envName:       "sub-pending",
+			entries:       absEntries,
+			opts:          replayOptions{},
+			wantErrSubstr: "has no published preview URL",
+		},
+		{
+			name:           "header-routed PreviewGroup with multiple services succeeds when base-url is provided",
+			objects:        []client.Object{headerMultiPG},
+			envName:        "pg-header",
+			entries:        relEntries,
+			opts:           replayOptions{baseURL: "https://staging.example.com"},
+			wantBaseURL:    "https://staging.example.com",
+			wantPreviewURL: "https://staging.example.com",
+			wantHeaderKey:  "x-custom-env",
+			wantHeaderVal:  "pg-header-val",
+		},
+		{
+			name:          "subdomain-routed PreviewGroup with ambiguous overlapping services fails without preview-url",
+			objects:       []client.Object{subdomainMultiPG},
+			envName:       "pg-sub",
+			entries:       relEntries,
+			opts:          replayOptions{baseURL: "https://pr-42-web-admin.example.com"},
+			wantErrSubstr: "has multiple service URLs; pass --preview-url",
+		},
+		{
+			name:           "canSkipCluster allows replay without cluster when base-url and header-value are set",
+			nilApp:         true,
+			envName:        "offline-env",
+			entries:        relEntries,
+			opts:           replayOptions{baseURL: "https://staging.example.com", headerValue: "offline-env"},
+			wantBaseURL:    "https://staging.example.com",
+			wantPreviewURL: "https://staging.example.com",
+			wantHeaderKey:  replay.DefaultHeaderKey,
+			wantHeaderVal:  "offline-env",
+		},
+		{
+			name:          "missing cluster fails when routing flags are omitted",
+			nilApp:        true,
+			envName:       "offline-env",
+			entries:       relEntries,
+			opts:          replayOptions{baseURL: "https://staging.example.com"},
+			wantErrSubstr: "cannot resolve routing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var app *App
+			if !tt.nilApp {
+				fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+				app = &App{Namespace: "default", Client: fc}
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+
+			opts := tt.opts
+			baseURL, previewURL, headerKey, headerVal, _, err := resolveReplayRouting(cmd, app, tt.envName, tt.entries, &opts)
+			if tt.wantErrSubstr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrSubstr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBaseURL, baseURL)
+			assert.Equal(t, tt.wantPreviewURL, previewURL)
+			assert.Equal(t, tt.wantHeaderKey, headerKey)
+			assert.Equal(t, tt.wantHeaderVal, headerVal)
+		})
+	}
 }

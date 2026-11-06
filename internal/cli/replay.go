@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"fmt"
 	urlPkg "net/url"
 	"os"
@@ -245,8 +246,11 @@ func resolveReplayRouting(cmd *cobra.Command, app *App, envName string, entries 
 					if pg.Spec.Routing.HeaderValue != "" {
 						headerValue = pg.Spec.Routing.HeaderValue
 					}
-					clusterBaselineURL = strings.TrimSpace(pg.Spec.Routing.ExternalURL)
-					clusterPreviewURL, ambiguousPreviewService = selectPreviewGroupServiceURL(pg.Status.Services, baseURL, clusterBaselineURL, entries)
+					extURL := strings.TrimSpace(pg.Spec.Routing.ExternalURL)
+					if !strings.Contains(extURL, "{env}") {
+						clusterBaselineURL = extURL
+					}
+					clusterPreviewURL, ambiguousPreviewService = selectPreviewGroupServiceURL(pg.Status.Services, baseURL, extURL, entries)
 				} else if !canSkipCluster {
 					return "", "", "", "", ns, fmt.Errorf("failed to get environment %s (pass --preview-url or --header-key/--header-value to replay without cluster discovery): %w", envName, getErr)
 				}
@@ -265,7 +269,7 @@ func resolveReplayRouting(cmd *cobra.Command, app *App, envName string, entries 
 		headerValue = strings.TrimSpace(opts.headerValue)
 	}
 
-	if ambiguousPreviewService && previewURL == "" {
+	if ambiguousPreviewService && previewURL == "" && (subdomainRouted || (baseURL == "" && clusterBaselineURL == "" && !allAbsolute)) {
 		return "", "", "", "", ns, fmt.Errorf("preview group %s has multiple service URLs; pass --preview-url to select the target preview service", envName)
 	}
 
@@ -293,7 +297,7 @@ func resolveReplayRouting(cmd *cobra.Command, app *App, envName string, entries 
 
 	if baseURL == "" {
 		baseURL = clusterBaselineURL
-		if baseURL == "" {
+		if baseURL == "" && !allAbsolute {
 			baseURL = clusterPreviewURL
 		}
 	}
@@ -335,27 +339,194 @@ func selectPreviewGroupServiceURL(services []divergeiov1alpha1.PreviewGroupServi
 		return strings.TrimSpace(candidates[0].URL), false
 	}
 
-	refURL := explicitBaseURL
-	if refURL == "" {
-		refURL = externalURL
+	refURL := strings.TrimSpace(explicitBaseURL)
+	if refURL == "" && !strings.Contains(externalURL, "{") {
+		refURL = strings.TrimSpace(externalURL)
 	}
 	if refURL == "" && len(entries) > 0 && isAbsoluteHTTPURL(entries[0].Path) {
-		refURL = entries[0].Path
+		refURL = strings.TrimSpace(entries[0].Path)
 	}
-	if refURL != "" {
-		if parsed, err := urlPkg.Parse(refURL); err == nil {
-			host := strings.ToLower(parsed.Hostname())
-			var matched []string
-			for _, svc := range candidates {
-				name := strings.ToLower(strings.TrimSpace(svc.Name))
-				if name != "" && (host == name || strings.HasPrefix(host, name+".") || strings.Contains(host, "-"+name+"-") || strings.HasSuffix(host, "-"+name)) {
-					matched = append(matched, strings.TrimSpace(svc.URL))
+	if refURL == "" {
+		return "", true
+	}
+
+	parsed, err := urlPkg.Parse(refURL)
+	if err != nil || parsed.Hostname() == "" {
+		return "", true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	firstLabel, _, _ := strings.Cut(host, ".")
+
+	// 1. Check exact published service URL hostname or explicit {env} URL-template match.
+	var templateMatched []string
+	for _, svc := range candidates {
+		svcURL := strings.TrimSpace(svc.URL)
+		if svcParsed, err := urlPkg.Parse(svcURL); err == nil && strings.EqualFold(svcParsed.Hostname(), host) {
+			templateMatched = append(templateMatched, svcURL)
+			continue
+		}
+		if strings.Contains(externalURL, "{env}") {
+			for _, token := range []string{strings.TrimSpace(svc.EnvironmentName), strings.TrimSpace(svc.Name)} {
+				if token == "" {
+					continue
 				}
-			}
-			if len(matched) == 1 {
-				return matched[0], false
+				expanded := strings.ReplaceAll(externalURL, "{env}", token)
+				if expParsed, err := urlPkg.Parse(expanded); err == nil && strings.EqualFold(expParsed.Hostname(), host) {
+					templateMatched = append(templateMatched, svcURL)
+					break
+				}
 			}
 		}
 	}
+	if len(templateMatched) == 1 {
+		return templateMatched[0], false
+	}
+	if len(templateMatched) > 1 {
+		return "", true
+	}
+
+	// 2. Check generated child Environment name match (svc.EnvironmentName or pg-{group}-{service}-{hash8}).
+	var childEnvMatched []string
+	for _, svc := range candidates {
+		if matchesPreviewGroupChildEnv(host, firstLabel, svc) {
+			childEnvMatched = append(childEnvMatched, strings.TrimSpace(svc.URL))
+		}
+	}
+	if len(childEnvMatched) == 1 {
+		return childEnvMatched[0], false
+	}
+	if len(childEnvMatched) > 1 {
+		return "", true
+	}
+
+	// 3. Match hyphen-delimited service tokens within the first DNS label or host.
+	// Overlapping names (such as "web" and "web-admin" against "pr-42-web-admin.example.com")
+	// match multiple candidates and return an ambiguity result.
+	var matched []string
+	for _, svc := range candidates {
+		name := sanitizeDNSLabel(svc.Name)
+		if name != "" && (host == name || labelMatchesServiceToken(firstLabel, name)) {
+			matched = append(matched, strings.TrimSpace(svc.URL))
+		}
+	}
+	if len(matched) == 1 {
+		return matched[0], false
+	}
 	return "", true
+}
+
+// matchesPreviewGroupChildEnv reports whether host or firstLabel matches a PreviewGroup child Environment name.
+func matchesPreviewGroupChildEnv(host, firstLabel string, svc divergeiov1alpha1.PreviewGroupServiceStatus) bool {
+	if envName := sanitizeDNSLabel(svc.EnvironmentName); envName != "" {
+		if host == envName || labelMatchesServiceToken(firstLabel, envName) {
+			return true
+		}
+	}
+	if svcParsed, err := urlPkg.Parse(strings.TrimSpace(svc.URL)); err == nil {
+		svcFirstLabel, _, _ := strings.Cut(strings.ToLower(svcParsed.Hostname()), ".")
+		if isGeneratedChildEnvLabel(svcFirstLabel, svc.Name) && (host == svcFirstLabel || labelMatchesServiceToken(firstLabel, svcFirstLabel)) {
+			return true
+		}
+	}
+	return isGeneratedChildEnvLabel(firstLabel, svc.Name)
+}
+
+// isGeneratedChildEnvLabel reports whether label contains a generated child Environment name (pg-{group}-{service}-{hash8}) for serviceName.
+func isGeneratedChildEnvLabel(label, serviceName string) bool {
+	sanitizedSvc := sanitizeDNSLabel(serviceName)
+	if sanitizedSvc == "" {
+		return false
+	}
+	for offset := 0; offset < len(label); {
+		rel := strings.Index(label[offset:], "pg-")
+		if rel < 0 {
+			break
+		}
+		idx := offset + rel
+		offset = idx + 3
+		if idx > 0 && label[idx-1] != '-' {
+			continue
+		}
+		rem := label[idx:]
+		if len(rem) <= 12 {
+			continue
+		}
+		// Look for -<sanitizedSvc>-<8 hex chars> at the end of rem or before a hyphen delimiter
+		needle := "-" + sanitizedSvc + "-"
+		for searchFrom := 3; searchFrom < len(rem); {
+			pos := strings.Index(rem[searchFrom:], needle)
+			if pos < 0 {
+				break
+			}
+			matchIdx := searchFrom + pos
+			searchFrom = matchIdx + 1
+			group := rem[3:matchIdx]
+			if group == "" {
+				continue
+			}
+			hashStart := matchIdx + len(needle)
+			if hashStart+8 > len(rem) {
+				continue
+			}
+			if hashStart+8 < len(rem) && rem[hashStart+8] != '-' {
+				continue
+			}
+			hashPart := rem[hashStart : hashStart+8]
+			if !isLowerHex8(hashPart) {
+				continue
+			}
+			sum := sha256.Sum256([]byte(group + "/" + strings.TrimSpace(serviceName)))
+			if fmt.Sprintf("%x", sum)[:8] == hashPart {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isLowerHex8 reports whether s is an 8-character lowercase hexadecimal string.
+func isLowerHex8(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for i := 0; i < 8; i++ {
+		c := s[i]
+		isDigit := c >= '0' && c <= '9'
+		isHexAlpha := c >= 'a' && c <= 'f'
+		if !isDigit && !isHexAlpha {
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizeDNSLabel normalizes a service or environment identifier into a lowercase hyphenated DNS token.
+func sanitizeDNSLabel(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteByte(c)
+			prevDash = false
+		} else if c == '-' || c == '.' || c == '_' {
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
+}
+
+// labelMatchesServiceToken reports whether label equals token or contains token bounded by hyphens.
+func labelMatchesServiceToken(label, token string) bool {
+	if label == "" || token == "" {
+		return false
+	}
+	return label == token ||
+		strings.HasPrefix(label, token+"-") ||
+		strings.Contains(label, "-"+token+"-") ||
+		strings.HasSuffix(label, "-"+token)
 }

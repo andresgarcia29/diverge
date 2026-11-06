@@ -611,6 +611,7 @@ func (r *AgentTaskReconciler) mintAndSaveToken(ctx context.Context, task *v1alph
 			"diverge_verify",
 			"diverge_loadtest",
 			"diverge_visual_test",
+			"diverge_replay",
 			"diverge_get_task",
 			"diverge_list_tasks",
 		},

@@ -148,6 +148,7 @@ func TestMCPToolRegistration(t *testing.T) {
 		"diverge_wait_for_ready",
 		"diverge_fetch_errors",
 		"diverge_visual_test",
+		"diverge_replay",
 	}
 	for _, name := range expectedEnvTools {
 		assert.Contains(t, tools, name, "expected EnvironmentService tool %s to be registered", name)

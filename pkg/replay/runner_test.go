@@ -262,7 +262,7 @@ func TestFormatReportOutputs(t *testing.T) {
 				FailureReasons:    []string{"1 breaking contract diff(s) (e.g. proto.field_2: missing_field)"},
 				ContractDiffs: []ContractDiff{
 					{
-						Path:     "proto.field_2",
+						Path:     "proto.field_2|sub",
 						Kind:     "missing_field",
 						Baseline: "bytes|string",
 						Breaking: true,
@@ -285,8 +285,7 @@ func TestFormatReportOutputs(t *testing.T) {
 	mdStr := mdBuf.String()
 	assert.Contains(t, mdStr, "### ❌ Diverge Traffic Replay Failed: pr-42")
 	assert.Contains(t, mdStr, "#### 🔍 Contract & Wire Diffs")
-	assert.Contains(t, mdStr, "proto.field_2")
-	assert.Contains(t, mdStr, `bytes\|string`)
+	assert.Contains(t, mdStr, "| req-2 (`/acme.v1.Order\\|Create`) | `proto.field_2\\|sub` | `missing_field` | `bytes\\|string` | `` | **Yes** |")
 
 	var jsonBuf bytes.Buffer
 	require.NoError(t, FormatJSON(&jsonBuf, report))

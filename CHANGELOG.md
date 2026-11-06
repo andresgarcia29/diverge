@@ -11,7 +11,7 @@
 
 #### 🤖 Automated Draft PR / MR Creation & `status.prURL` Reporting for `AgentTask` Sandboxes
 - **Automated GitHub PR & GitLab MR Creation (`internal/agentrunner/`, `internal/sandbox/`) (#326)**: `diverge-agent-runner` now automatically opens a Draft (or Ready-for-Review) GitHub Pull Request or GitLab Merge Request after committing and pushing an `AgentTask`'s working branch when an SCM token (`divergedev.com/scm-secret` or `DIVERGE_SCM_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` / `GITLAB_TOKEN`) is mounted.
-- **`AgentTaskStatus.PRURL` Reporting & Dashboard Deep-Links (`api/v1alpha1/agenttask_types.go`, `internal/server/llm_meter.go`, `web/src/pages/AgentTaskDetail.tsx`) (#326)**: Reports `prUrl` via `POST /api/v1/agenttask/meter`, persists `status.prUrl` on the `AgentTask` CR, and surfaces an **Open PR** button and status badge in the Web Dashboard and `diverge task status`.
+- **`AgentTaskStatus.PRURL` Reporting & Dashboard Deep-Links (`api/v1alpha1/agenttask_types.go`, `internal/server/llm_meter.go`, `web/src/pages/AgentTaskDetail.tsx`) (#326)**: Reports `prUrl` via `POST /api/v1/agenttask/meter`, persists `status.prURL` on the `AgentTask` CR, and surfaces an **Open PR** button and status badge in the Web Dashboard and `diverge task status`.
 
 ---
 

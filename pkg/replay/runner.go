@@ -3,10 +3,12 @@ package replay
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -105,10 +107,7 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 		return nil, errors.New("cannot run replay with 0 trace entries")
 	}
 
-	client := r.Config.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: r.Config.Timeout}
-	}
+	client := secureHTTPClient(r.Config.HTTPClient, r.Config.Timeout)
 
 	previewBase := strings.TrimSpace(r.Config.PreviewBaseURL)
 	if previewBase == "" {
@@ -192,6 +191,106 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 	return report, nil
 }
 
+// secureHTTPClient returns an http.Client with dial-time SSRF IP validation and redirect target validation.
+func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	safeDial := func(ctx context.Context, network, addr string, innerDial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("splitting host and port %q: %w", addr, err)
+		}
+		if loadtest.IsProhibitedHost(host) {
+			return nil, fmt.Errorf("connection to prohibited destination %s blocked", host)
+		}
+
+		var ips []net.IP
+		if ip := net.ParseIP(host); ip != nil {
+			ips = []net.IP{ip}
+		} else {
+			resolvedIPs, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, fmt.Errorf("resolving host %q: %w", host, err)
+			}
+			ips = resolvedIPs
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IP addresses found for host %s", host)
+		}
+		for _, ip := range ips {
+			if loadtest.IsProhibitedIP(ip) {
+				return nil, fmt.Errorf("connection to prohibited IP %s (%s) blocked", ip.String(), host)
+			}
+		}
+
+		var lastErr error
+		for _, ip := range ips {
+			targetAddr := net.JoinHostPort(ip.String(), port)
+			var conn net.Conn
+			var dialErr error
+			if innerDial != nil {
+				conn, dialErr = innerDial(ctx, network, targetAddr)
+			} else {
+				conn, dialErr = dialer.DialContext(ctx, network, targetAddr)
+			}
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, lastErr
+	}
+
+	var out http.Client
+	if baseClient != nil {
+		out = *baseClient
+	} else {
+		out = http.Client{Timeout: timeout}
+	}
+
+	switch tr := out.Transport.(type) {
+	case nil:
+		out.Transport = &http.Transport{
+			MaxIdleConns:        200,
+			MaxIdleConnsPerHost: 50,
+			IdleConnTimeout:     90 * time.Second,
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return safeDial(ctx, network, addr, nil)
+			},
+		}
+	case *http.Transport:
+		cloned := tr.Clone()
+		origDial := cloned.DialContext
+		cloned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return safeDial(ctx, network, addr, origDial)
+		}
+		out.Transport = cloned
+	}
+
+	origRedirect := out.CheckRedirect
+	out.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := loadtest.ValidateTargetURL(req.URL.String()); err != nil {
+			return fmt.Errorf("redirect target prohibited: %w", err)
+		}
+		if origRedirect != nil {
+			return origRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+
+	return &out
+}
+
+// replayEntry executes a single trace entry against baseline and preview endpoints and compares their responses.
 func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int, entry RequestEntry, baseURL, previewBaseURL string) EntryResult {
 	res := EntryResult{
 		Index:  index,
@@ -221,7 +320,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		return res
 	}
 
-	baseStatus, baseCT, baseBody, baseDur, baseErr := executeHTTP(ctx, client, entry.Method, resolvedBaseURL, entry.Headers, payload, "", "")
+	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "")
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -230,7 +329,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevBody, prevDur, prevErr := executeHTTP(ctx, client, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue)
+	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -260,6 +359,25 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 
 	protocol, diffs := ComparePayloads(baseCT, prevCT, baseBody, prevBody, diffOpts)
+	if baseGRPCStatus != "" || prevGRPCStatus != "" {
+		normBase := normalizeGRPCStatus(baseGRPCStatus)
+		normPrev := normalizeGRPCStatus(prevGRPCStatus)
+		if normBase != normPrev {
+			res.StatusMatch = false
+			if r.Config.FailOnStatusDiff {
+				res.Passed = false
+				res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("gRPC status mismatch: baseline grpc-status=%s vs preview grpc-status=%s", normBase, normPrev))
+			}
+			diffs = append(diffs, ContractDiff{
+				Path:     "grpc.status",
+				Kind:     "status_mismatch",
+				Baseline: normBase,
+				Preview:  normPrev,
+				Breaking: true,
+			})
+		}
+	}
+
 	res.Protocol = protocol
 	res.ContractDiffs = diffs
 
@@ -284,6 +402,15 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 
 	return res
+}
+
+// normalizeGRPCStatus normalizes an empty Grpc-Status header/trailer value to "0" (OK).
+func normalizeGRPCStatus(status string) string {
+	trimmed := strings.TrimSpace(status)
+	if trimmed == "" {
+		return "0"
+	}
+	return trimmed
 }
 
 // ResolveEntryURL resolves a trace entry's path or URL against an optional base URL and validates against SSRF.
@@ -333,20 +460,35 @@ func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	return finalURL, nil
 }
 
-func executeHTTP(ctx context.Context, client *http.Client, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string) (int, string, []byte, time.Duration, error) {
+// executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string) (int, string, string, []byte, time.Duration, error) {
+	reqCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
+	req, err := http.NewRequestWithContext(reqCtx, method, targetURL, bodyReader)
 	if err != nil {
-		return 0, "", nil, 0, err
+		return 0, "", "", nil, 0, err
 	}
 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+
+	// Always strip any recorded routing headers or diverge.env baggage items first so baseline requests never route to preview
+	req.Header.Del(DefaultHeaderKey)
+	if routingKey != "" {
+		req.Header.Del(routingKey)
+	}
+	stripDivergeBaggage(&req.Header)
 
 	if routingKey != "" && routingVal != "" {
 		req.Header.Set(routingKey, routingVal)
@@ -360,20 +502,51 @@ func executeHTTP(ctx context.Context, client *http.Client, method, targetURL str
 
 	start := time.Now()
 	resp, err := client.Do(req)
-	dur := time.Since(start)
 	if err != nil {
-		return 0, "", nil, dur, err
+		return 0, "", "", nil, time.Since(start), err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	dur := time.Since(start)
 	if err != nil {
-		return resp.StatusCode, resp.Header.Get("Content-Type"), nil, dur, fmt.Errorf("read response body: %w", err)
+		return resp.StatusCode, resp.Header.Get("Content-Type"), "", nil, dur, fmt.Errorf("read response body: %w", err)
+	}
+	if len(respBody) > maxResponseBytes {
+		return resp.StatusCode, resp.Header.Get("Content-Type"), "", nil, dur, fmt.Errorf("response body exceeds maximum comparison size of %d bytes", maxResponseBytes)
 	}
 
-	return resp.StatusCode, resp.Header.Get("Content-Type"), respBody, dur, nil
+	grpcStatus := strings.TrimSpace(resp.Header.Get("Grpc-Status"))
+	if grpcStatus == "" {
+		grpcStatus = strings.TrimSpace(resp.Trailer.Get("Grpc-Status"))
+	}
+
+	return resp.StatusCode, resp.Header.Get("Content-Type"), grpcStatus, respBody, dur, nil
 }
 
+// stripDivergeBaggage removes any diverge.env=<value> entries from the W3C baggage header.
+func stripDivergeBaggage(hdr *http.Header) {
+	existing := hdr.Get("baggage")
+	if existing == "" {
+		return
+	}
+	parts := strings.Split(existing, ",")
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "diverge.env=") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	if len(kept) == 0 {
+		hdr.Del("baggage")
+	} else {
+		hdr.Set("baggage", strings.Join(kept, ","))
+	}
+}
+
+// percentileInt64 computes the given percentile (0.0 to 1.0) of a slice of int64 values.
 func percentileInt64(values []int64, pct float64) int64 {
 	if len(values) == 0 {
 		return 0
@@ -436,15 +609,16 @@ func FormatTable(w io.Writer, report *Report) {
 }
 
 // FormatMarkdown renders a GitHub Step Summary Markdown report for the replay run.
-func FormatMarkdown(w io.Writer, report *Report) {
+func FormatMarkdown(w io.Writer, report *Report) error {
+	var buf bytes.Buffer
 	envLabel := report.Environment
 	if envLabel == "" {
 		envLabel = report.TargetURL
 	}
 	if report.Passed {
-		_, _ = fmt.Fprintf(w, "### ✅ Diverge Traffic Replay Passed: %s\n\n", envLabel)
+		_, _ = fmt.Fprintf(&buf, "### ✅ Diverge Traffic Replay Passed: %s\n\n", envLabel)
 	} else {
-		_, _ = fmt.Fprintf(w, "### ❌ Diverge Traffic Replay Failed: %s\n\n", envLabel)
+		_, _ = fmt.Fprintf(&buf, "### ❌ Diverge Traffic Replay Failed: %s\n\n", envLabel)
 	}
 
 	targetStr := report.TargetURL
@@ -455,11 +629,11 @@ func FormatMarkdown(w io.Writer, report *Report) {
 	if headerStr == "" {
 		headerStr = "-"
 	}
-	_, _ = fmt.Fprintf(w, "**Target:** %s | **Header:** `%s` | **Requests:** %d (%d passed, %d failed) | **p95 Latency:** %dms → %dms\n\n",
+	_, _ = fmt.Fprintf(&buf, "**Target:** %s | **Header:** `%s` | **Requests:** %d (%d passed, %d failed) | **p95 Latency:** %dms → %dms\n\n",
 		targetStr, headerStr, report.TotalRequests, report.PassedRequests, report.FailedRequests, report.BaselineP95Ms, report.PreviewP95Ms)
 
-	_, _ = fmt.Fprintln(w, "| ID | Method | Path | Protocol | Status (Base → Prev) | Latency (Base → Prev) | Result | Details |")
-	_, _ = fmt.Fprintln(w, "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+	_, _ = fmt.Fprintln(&buf, "| ID | Method | Path | Protocol | Status (Base → Prev) | Latency (Base → Prev) | Result | Details |")
+	_, _ = fmt.Fprintln(&buf, "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
 	for _, r := range report.Results {
 		result := "✅ PASS"
 		if !r.Passed {
@@ -477,7 +651,7 @@ func FormatMarkdown(w io.Writer, report *Report) {
 		}
 		details = strings.ReplaceAll(details, "|", "\\|")
 		pathEsc := strings.ReplaceAll(r.Path, "|", "\\|")
-		_, _ = fmt.Fprintf(w, "| %s | %s | `%s` | `%s` | %d → %d | %dms → %dms | %s | %s |\n",
+		_, _ = fmt.Fprintf(&buf, "| %s | %s | `%s` | `%s` | %d → %d | %dms → %dms | %s | %s |\n",
 			r.ID, r.Method, pathEsc, protoStr, r.BaselineStatus, r.PreviewStatus, r.BaselineLatencyMs, r.PreviewLatencyMs, result, details)
 	}
 
@@ -489,9 +663,9 @@ func FormatMarkdown(w io.Writer, report *Report) {
 		}
 	}
 	if hasDiffs {
-		_, _ = fmt.Fprintln(w, "\n#### 🔍 Contract & Wire Diffs")
-		_, _ = fmt.Fprintln(w, "| Request | Field Path | Kind | Baseline | Preview | Breaking |")
-		_, _ = fmt.Fprintln(w, "| :--- | :--- | :--- | :--- | :--- | :--- |")
+		_, _ = fmt.Fprintln(&buf, "\n#### 🔍 Contract & Wire Diffs")
+		_, _ = fmt.Fprintln(&buf, "| Request | Field Path | Kind | Baseline | Preview | Breaking |")
+		_, _ = fmt.Fprintln(&buf, "| :--- | :--- | :--- | :--- | :--- | :--- |")
 		for _, r := range report.Results {
 			for _, d := range r.ContractDiffs {
 				brk := "No"
@@ -500,9 +674,12 @@ func FormatMarkdown(w io.Writer, report *Report) {
 				}
 				bEsc := strings.ReplaceAll(d.Baseline, "|", "\\|")
 				pEsc := strings.ReplaceAll(d.Preview, "|", "\\|")
-				_, _ = fmt.Fprintf(w, "| %s (`%s`) | `%s` | `%s` | `%s` | `%s` | %s |\n",
+				_, _ = fmt.Fprintf(&buf, "| %s (`%s`) | `%s` | `%s` | `%s` | `%s` | %s |\n",
 					r.ID, r.Path, d.Path, d.Kind, bEsc, pEsc, brk)
 			}
 		}
 	}
+
+	_, err := w.Write(buf.Bytes())
+	return err
 }

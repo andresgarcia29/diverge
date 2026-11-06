@@ -42,6 +42,7 @@ type rawRequestEntry struct {
 	ExpectStatusCame int               `json:"expectStatus,omitempty"`
 }
 
+// normalize validates and converts a raw unmarshaled trace entry into a canonical RequestEntry.
 func (r rawRequestEntry) normalize(index int) (RequestEntry, error) {
 	target := strings.TrimSpace(r.Path)
 	if target == "" {
@@ -188,8 +189,8 @@ func ParseTrace(data []byte, extHint string) ([]RequestEntry, error) {
 		return normalizeRawEntries(rawList)
 	}
 
-	if trimmed[0] == '{' && !bytes.Contains(trimmed, []byte("\n{")) {
-		// Check if it is a HAR archive or a wrapper {"requests": [...]}
+	if trimmed[0] == '{' {
+		// Check if it is a complete HAR archive or a wrapper {"requests": [...]} before falling back to JSONL
 		var probe struct {
 			Log      *json.RawMessage  `json:"log"`
 			Requests []rawRequestEntry `json:"requests"`
@@ -207,6 +208,7 @@ func ParseTrace(data []byte, extHint string) ([]RequestEntry, error) {
 	return parseJSONL(trimmed)
 }
 
+// normalizeRawEntries converts a slice of rawRequestEntry values into normalized RequestEntry items.
 func normalizeRawEntries(rawList []rawRequestEntry) ([]RequestEntry, error) {
 	if len(rawList) == 0 {
 		return nil, errors.New("trace contains no request entries")
@@ -222,6 +224,7 @@ func normalizeRawEntries(rawList []rawRequestEntry) ([]RequestEntry, error) {
 	return out, nil
 }
 
+// parseJSONL parses newline-delimited JSON request entries, skipping blank lines and # or // comments.
 func parseJSONL(data []byte) ([]RequestEntry, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	// Allow up to 10MB per JSONL line for large payloads
@@ -254,6 +257,7 @@ func parseJSONL(data []byte) ([]RequestEntry, error) {
 	return entries, nil
 }
 
+// parseHAR extracts RequestEntry items from an HTTP Archive (HAR 1.2) JSON document.
 func parseHAR(data []byte) ([]RequestEntry, error) {
 	var archive harArchive
 	if err := json.Unmarshal(data, &archive); err != nil {

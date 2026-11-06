@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	urlPkg "net/url"
 	"os"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type replayOptions struct {
 	githubSummary      bool
 }
 
+// newReplayCmd constructs the `diverge replay` subcommand for deterministic traffic replay and contract diffing.
 func newReplayCmd(app *App) *cobra.Command {
 	opts := &replayOptions{}
 
@@ -72,8 +74,7 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 				return err
 			}
 
-			firstPath := entries[0].Path
-			baseURL, previewURL, headerKey, headerValue, ns, err := resolveReplayRouting(cmd, app, envName, firstPath, opts)
+			baseURL, previewURL, headerKey, headerValue, ns, err := resolveReplayRouting(cmd, app, envName, entries, opts)
 			if err != nil {
 				return err
 			}
@@ -129,11 +130,24 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 					if err != nil {
 						return fmt.Errorf("failed to write GITHUB_STEP_SUMMARY: %w", err)
 					}
-					replay.FormatMarkdown(f, report)
-					_ = f.Close()
-				} else if !opts.outputJSON {
-					_, _ = fmt.Fprintln(out)
-					replay.FormatMarkdown(out, report)
+					writeErr := replay.FormatMarkdown(f, report)
+					closeErr := f.Close()
+					if writeErr != nil {
+						return fmt.Errorf("failed to write GITHUB_STEP_SUMMARY: %w", writeErr)
+					}
+					if closeErr != nil {
+						return fmt.Errorf("failed to close GITHUB_STEP_SUMMARY: %w", closeErr)
+					}
+				} else {
+					summaryOut := out
+					if opts.outputJSON {
+						summaryOut = cmd.ErrOrStderr()
+					} else {
+						_, _ = fmt.Fprintln(summaryOut)
+					}
+					if err := replay.FormatMarkdown(summaryOut, report); err != nil {
+						return fmt.Errorf("failed to write Markdown summary: %w", err)
+					}
 				}
 			}
 
@@ -160,42 +174,63 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 	cmd.Flags().StringVar(&opts.protoDescriptor, "proto-descriptor", "", "Optional path to compiled Protobuf FileDescriptorSet (.binpb) for schema-aware decoding")
 	cmd.Flags().StringVar(&opts.protoMessage, "proto-message", "", "Default fully-qualified Protobuf message type for response decoding")
 	cmd.Flags().BoolVar(&opts.outputJSON, "json", false, "Output replay report as JSON")
-	cmd.Flags().BoolVar(&opts.githubSummary, "github-summary", false, "Write Markdown replay report to $GITHUB_STEP_SUMMARY (or stdout if unset)")
+	cmd.Flags().BoolVar(&opts.githubSummary, "github-summary", false, "Write Markdown replay report to $GITHUB_STEP_SUMMARY (or stdout, or stderr when --json is set)")
 
 	return cmd
 }
 
-func resolveReplayRouting(cmd *cobra.Command, app *App, envName, firstPath string, opts *replayOptions) (string, string, string, string, string, error) {
-	if app != nil && app.Namespace == "" {
-		_ = app.ResolveNamespace()
-	}
-	ns := "default"
-	if app != nil && app.Namespace != "" {
-		ns = app.Namespace
-	}
-
-	curlOpts := &curlOptions{
-		baseURL:     opts.baseURL,
-		headerKey:   opts.headerKey,
-		headerValue: opts.headerValue,
-		timeout:     opts.timeout,
-	}
-
-	resolvedURL, headerKey, headerValue, err := resolveCurlRouting(cmd, app, envName, firstPath, curlOpts)
-	if err != nil {
-		return "", "", "", "", ns, err
-	}
-
+// resolveReplayRouting resolves the baseline URL, preview URL, routing header key/value, and namespace for a replay run.
+func resolveReplayRouting(cmd *cobra.Command, app *App, envName string, entries []replay.RequestEntry, opts *replayOptions) (string, string, string, string, string, error) {
+	baseURL := strings.TrimSpace(opts.baseURL)
 	previewURL := strings.TrimSpace(opts.previewURL)
+	headerKey := replay.DefaultHeaderKey
+	headerValue := envName
+
+	explicitHeaderRouting := strings.TrimSpace(opts.headerKey) != "" || strings.TrimSpace(opts.headerValue) != ""
+	if cmd != nil && (cmd.Flags().Changed("header-key") || cmd.Flags().Changed("header-value")) {
+		explicitHeaderRouting = true
+	}
+	allAbsolute := allEntriesAbsolute(entries)
+	canSkipCluster := (previewURL != "" || explicitHeaderRouting) && (baseURL != "" || allAbsolute)
+
+	ns := "default"
+	if app != nil {
+		if app.Namespace == "" {
+			if err := app.ResolveNamespace(); err != nil {
+				if !canSkipCluster {
+					return "", "", "", "", "", err
+				}
+			}
+		}
+		if app.Namespace != "" {
+			ns = app.Namespace
+		}
+	}
+
 	subdomainRouted := false
-	var clusterPreviewURL string
+	var (
+		clusterPreviewURL       string
+		clusterBaselineURL      string
+		ambiguousPreviewService bool
+	)
 
 	if app != nil {
-		if c, _, kErr := app.KubeClient(); kErr == nil && c != nil {
+		c, _, kErr := app.KubeClient()
+		if kErr == nil && c != nil {
 			var env divergeiov1alpha1.Environment
 			if getErr := c.Get(cmd.Context(), client.ObjectKey{Name: envName, Namespace: ns}, &env); getErr == nil {
-				subdomainRouted = strings.EqualFold(env.Spec.Routing.Mode, "subdomain")
-				clusterPreviewURL = strings.TrimSpace(env.Status.URL)
+				subdomainRouted = strings.EqualFold(strings.TrimSpace(env.Spec.Routing.Mode), "subdomain")
+				if env.Spec.Routing.HeaderKey != "" {
+					headerKey = env.Spec.Routing.HeaderKey
+				}
+				if env.Spec.Routing.HeaderValue != "" {
+					headerValue = env.Spec.Routing.HeaderValue
+				}
+				if subdomainRouted {
+					clusterPreviewURL = strings.TrimSpace(env.Status.URL)
+				} else {
+					clusterBaselineURL = strings.TrimSpace(env.Status.URL)
+				}
 			} else {
 				var pg divergeiov1alpha1.PreviewGroup
 				pgErr := c.Get(cmd.Context(), client.ObjectKey{Name: envName, Namespace: ns}, &pg)
@@ -203,30 +238,124 @@ func resolveReplayRouting(cmd *cobra.Command, app *App, envName, firstPath strin
 					pgErr = c.Get(cmd.Context(), client.ObjectKey{Name: envName}, &pg)
 				}
 				if pgErr == nil {
-					subdomainRouted = strings.EqualFold(pg.Spec.Routing.Mode, "subdomain")
-					if len(pg.Status.Services) > 0 {
-						clusterPreviewURL = strings.TrimSpace(pg.Status.Services[0].URL)
+					subdomainRouted = strings.EqualFold(strings.TrimSpace(pg.Spec.Routing.Mode), "subdomain")
+					if pg.Spec.Routing.HeaderKey != "" {
+						headerKey = pg.Spec.Routing.HeaderKey
 					}
+					if pg.Spec.Routing.HeaderValue != "" {
+						headerValue = pg.Spec.Routing.HeaderValue
+					}
+					clusterBaselineURL = strings.TrimSpace(pg.Spec.Routing.ExternalURL)
+					clusterPreviewURL, ambiguousPreviewService = selectPreviewGroupServiceURL(pg.Status.Services, baseURL, clusterBaselineURL, entries)
+				} else if !canSkipCluster {
+					return "", "", "", "", ns, fmt.Errorf("failed to get environment %s (pass --preview-url or --header-key/--header-value to replay without cluster discovery): %w", envName, getErr)
 				}
 			}
+		} else if !canSkipCluster {
+			return "", "", "", "", ns, fmt.Errorf("failed to connect to cluster (pass --preview-url or --header-key/--header-value to replay without cluster discovery): %w", kErr)
 		}
+	} else if !canSkipCluster {
+		return "", "", "", "", ns, fmt.Errorf("cannot resolve routing for %s without cluster connection; pass --preview-url or --header-key/--header-value", envName)
+	}
+
+	if strings.TrimSpace(opts.headerKey) != "" {
+		headerKey = strings.TrimSpace(opts.headerKey)
+	}
+	if strings.TrimSpace(opts.headerValue) != "" {
+		headerValue = strings.TrimSpace(opts.headerValue)
+	}
+
+	if ambiguousPreviewService && previewURL == "" {
+		return "", "", "", "", ns, fmt.Errorf("preview group %s has multiple service URLs; pass --preview-url to select the target preview service", envName)
 	}
 
 	if subdomainRouted {
-		if strings.TrimSpace(opts.baseURL) == "" && !isAbsoluteHTTPURL(firstPath) {
-			return "", "", "", "", ns, fmt.Errorf(
-				"environment %s uses subdomain routing (%s); pass --base-url <baseline-url> so baseline and preview requests target their respective hosts",
-				envName, resolvedURL,
-			)
-		}
-		if previewURL == "" && clusterPreviewURL != "" {
+		if previewURL == "" {
 			previewURL = clusterPreviewURL
 		}
+		if previewURL == "" {
+			return "", "", "", "", ns, fmt.Errorf(
+				"environment %s uses subdomain routing but has no published preview URL; pass --preview-url or wait for the preview URL to be published",
+				envName,
+			)
+		}
+		if baseURL == "" {
+			baseURL = clusterBaselineURL
+		}
+		if baseURL == "" && !allAbsolute {
+			return "", "", "", "", ns, fmt.Errorf(
+				"environment %s uses subdomain routing (%s); pass --base-url <baseline-url> so baseline and preview requests target their respective hosts",
+				envName, previewURL,
+			)
+		}
+		return baseURL, previewURL, headerKey, headerValue, ns, nil
 	}
 
+	if baseURL == "" {
+		baseURL = clusterBaselineURL
+		if baseURL == "" {
+			baseURL = clusterPreviewURL
+		}
+	}
+	if baseURL == "" && !allAbsolute {
+		return "", "", "", "", ns, fmt.Errorf("environment %s has no baseline URL; pass --base-url <url>", envName)
+	}
 	if previewURL == "" {
-		previewURL = resolvedURL
+		previewURL = baseURL
 	}
 
-	return resolvedURL, previewURL, headerKey, headerValue, ns, nil
+	return baseURL, previewURL, headerKey, headerValue, ns, nil
+}
+
+// allEntriesAbsolute reports whether every request entry in entries specifies an absolute http:// or https:// URL.
+func allEntriesAbsolute(entries []replay.RequestEntry) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	for _, e := range entries {
+		if !isAbsoluteHTTPURL(e.Path) {
+			return false
+		}
+	}
+	return true
+}
+
+// selectPreviewGroupServiceURL selects an unambiguous service URL from a PreviewGroup's status services.
+func selectPreviewGroupServiceURL(services []divergeiov1alpha1.PreviewGroupServiceStatus, explicitBaseURL, externalURL string, entries []replay.RequestEntry) (string, bool) {
+	var candidates []divergeiov1alpha1.PreviewGroupServiceStatus
+	for _, svc := range services {
+		if strings.TrimSpace(svc.URL) != "" {
+			candidates = append(candidates, svc)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	if len(candidates) == 1 {
+		return strings.TrimSpace(candidates[0].URL), false
+	}
+
+	refURL := explicitBaseURL
+	if refURL == "" {
+		refURL = externalURL
+	}
+	if refURL == "" && len(entries) > 0 && isAbsoluteHTTPURL(entries[0].Path) {
+		refURL = entries[0].Path
+	}
+	if refURL != "" {
+		if parsed, err := urlPkg.Parse(refURL); err == nil {
+			host := strings.ToLower(parsed.Hostname())
+			var matched []string
+			for _, svc := range candidates {
+				name := strings.ToLower(strings.TrimSpace(svc.Name))
+				if name != "" && (host == name || strings.HasPrefix(host, name+".") || strings.Contains(host, "-"+name+"-") || strings.HasSuffix(host, "-"+name)) {
+					matched = append(matched, strings.TrimSpace(svc.URL))
+				}
+			}
+			if len(matched) == 1 {
+				return matched[0], false
+			}
+		}
+	}
+	return "", true
 }

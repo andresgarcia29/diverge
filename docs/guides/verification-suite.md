@@ -115,6 +115,7 @@ Replay recorded multi-endpoint HTTP, ConnectRPC, and Protobuf/gRPC request trace
 diverge replay pr-42 --from ./traces/checkout.jsonl
 
 # Replay a Chrome DevTools / Playwright HAR archive and emit a GitHub Step Summary
+# (writes Markdown to $GITHUB_STEP_SUMMARY, or stdout, or stderr when --json is set)
 diverge replay pr-42 --from ./recording.har --base-url https://staging.example.com --github-summary
 
 # Replay binary Protobuf/gRPC traffic with schema-aware descriptor decoding

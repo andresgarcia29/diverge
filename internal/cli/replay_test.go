@@ -58,6 +58,15 @@ func TestReplayCmd_JSONAndProtobufPassAndFail(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(msg)
 
+		case "/api/v1/status-diff":
+			w.Header().Set("Content-Type", "application/json")
+			if isPreview {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				w.WriteHeader(http.StatusOK)
+			}
+			_, _ = w.Write([]byte(`{"status":"identical"}`))
+
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -143,4 +152,28 @@ func TestReplayCmd_JSONAndProtobufPassAndFail(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(summaryBytes), "Diverge Traffic Replay Failed: pr-42")
 	assert.Contains(t, string(summaryBytes), "`proto.field_2`")
+
+	// 3. Status mismatch fails by default and passes when --fail-on-status-diff=false
+	statusTracePath := filepath.Join(tmpDir, "status-diff.jsonl")
+	require.NoError(t, os.WriteFile(statusTracePath, []byte(`{"id":"status-diff","method":"GET","path":"/api/v1/status-diff"}`+"\n"), 0o644))
+
+	rootStatusFail := NewRootCmd(app)
+	var statusFailOut bytes.Buffer
+	rootStatusFail.SetOut(&statusFailOut)
+	rootStatusFail.SetErr(&statusFailOut)
+	rootStatusFail.SetArgs([]string{"replay", "pr-42", "--from", statusTracePath})
+	require.Error(t, rootStatusFail.Execute())
+
+	rootStatusPass := NewRootCmd(app)
+	var statusPassOut, statusPassErr bytes.Buffer
+	t.Setenv("GITHUB_STEP_SUMMARY", "")
+	rootStatusPass.SetOut(&statusPassOut)
+	rootStatusPass.SetErr(&statusPassErr)
+	rootStatusPass.SetArgs([]string{"replay", "pr-42", "--from", statusTracePath, "--fail-on-status-diff=false", "--json", "--github-summary"})
+	require.NoError(t, rootStatusPass.Execute())
+
+	var statusReport replay.Report
+	require.NoError(t, json.Unmarshal(statusPassOut.Bytes(), &statusReport))
+	assert.True(t, statusReport.Passed)
+	assert.Contains(t, statusPassErr.String(), "Diverge Traffic Replay Passed: pr-42")
 }

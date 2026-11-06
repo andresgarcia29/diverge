@@ -50,7 +50,7 @@ func TestParseTrace_JSONArrayAndWrapper(t *testing.T) {
 	assert.Equal(t, "https://api.example.com/v1/Charge", entries[1].Path)
 	assert.Equal(t, 201, entries[1].ExpectStatus)
 
-	wrapperJSON := `{"requests":[{"method":"DELETE","path":"/api/v1/session"}]}`
+	wrapperJSON := "{\n\"requests\": [\n{\"method\":\"DELETE\",\"path\":\"/api/v1/session\"}\n]\n}"
 	wrapped, err := ParseTrace([]byte(wrapperJSON), ".json")
 	require.NoError(t, err)
 	require.Len(t, wrapped, 1)

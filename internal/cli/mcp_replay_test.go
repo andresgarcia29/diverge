@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/protocgen/proto2mcp/pkg/mcpruntime"
@@ -17,6 +19,19 @@ import (
 )
 
 func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
+	type capturedInvoiceReq struct {
+		method      string
+		contentType string
+		body        []byte
+	}
+	var (
+		mu              sync.Mutex
+		baseInvoiceReq  capturedInvoiceReq
+		prevInvoiceReq  capturedInvoiceReq
+		baseReqCaptured bool
+		prevReqCaptured bool
+	)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isPreview := r.Header.Get("x-diverge-env") == "pr-99"
 		switch r.URL.Path {
@@ -26,6 +41,25 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"u-1","plan":"pro"}`))
 
 		case "/acme.v1.Billing/GetInvoice":
+			reqBytes, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			if isPreview {
+				prevInvoiceReq = capturedInvoiceReq{
+					method:      r.Method,
+					contentType: r.Header.Get("Content-Type"),
+					body:        reqBytes,
+				}
+				prevReqCaptured = true
+			} else {
+				baseInvoiceReq = capturedInvoiceReq{
+					method:      r.Method,
+					contentType: r.Header.Get("Content-Type"),
+					body:        reqBytes,
+				}
+				baseReqCaptured = true
+			}
+			mu.Unlock()
+
 			w.Header().Set("Content-Type", "application/proto")
 			var msg []byte
 			msg = protowire.AppendTag(msg, 1, protowire.VarintType)
@@ -75,6 +109,17 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.IsError, "expected IsError=true because invoice preview dropped protobuf field 2")
 
+	mu.Lock()
+	require.True(t, baseReqCaptured)
+	require.True(t, prevReqCaptured)
+	assert.Equal(t, "POST", baseInvoiceReq.method)
+	assert.Equal(t, "application/proto", baseInvoiceReq.contentType)
+	assert.Equal(t, reqProto, baseInvoiceReq.body)
+	assert.Equal(t, "POST", prevInvoiceReq.method)
+	assert.Equal(t, "application/proto", prevInvoiceReq.contentType)
+	assert.Equal(t, reqProto, prevInvoiceReq.body)
+	mu.Unlock()
+
 	var report replay.Report
 	require.NoError(t, json.Unmarshal(res.Content, &report))
 	assert.False(t, report.Passed)
@@ -82,4 +127,19 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	assert.Equal(t, 1, report.PassedRequests)
 	assert.Equal(t, 1, report.FailedRequests)
 	assert.Equal(t, 1, report.BreakingDiffs)
+
+	// Rejects replay when base_url is set without name, routing_key, or preview_url
+	missingSelectorArgs, err := json.Marshal(map[string]any{
+		"base_url": srv.URL,
+		"requests": []map[string]any{
+			{"path": "/api/v1/profile"},
+		},
+	})
+	require.NoError(t, err)
+	missingRes, err := handler(context.Background(), mcpruntime.ToolRequest{
+		ToolName:  "diverge_replay",
+		Arguments: missingSelectorArgs,
+	})
+	require.NoError(t, err)
+	assert.True(t, missingRes.IsError)
 }

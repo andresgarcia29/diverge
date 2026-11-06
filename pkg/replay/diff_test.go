@@ -223,3 +223,108 @@ func TestComparePayloads_ProtobufWithDescriptorSchema(t *testing.T) {
 	assert.Equal(t, "missing_field", diffs[0].Kind)
 	assert.True(t, diffs[0].Breaking)
 }
+
+func TestComparePayloads_JSONArrayLaterElementAndTrailingData(t *testing.T) {
+	// Later array element (index 1) missing a baseline field in structural mode
+	baseJSON := []byte(`{"items":[{"id":"1","sku":"a"},{"id":"2","sku":"b"}]}`)
+	prevJSON := []byte(`{"items":[{"id":"1","sku":"a"},{"id":"2"}]}`)
+
+	protocol, diffs := ComparePayloads("application/json", "application/json", baseJSON, prevJSON, DiffOptions{
+		CompareValues: false,
+	})
+	assert.Equal(t, ProtocolJSON, protocol)
+	require.Len(t, diffs, 1)
+	assert.Equal(t, "$.items[1].sku", diffs[0].Path)
+	assert.Equal(t, "missing_field", diffs[0].Kind)
+	assert.True(t, diffs[0].Breaking)
+
+	// Trailing data in preview JSON response is rejected as decode_error
+	_, trailingDiffs := ComparePayloads("application/json", "application/json", []byte(`{"ok":true}`), []byte(`{"ok":true}{"error":true}`), DiffOptions{})
+	require.Len(t, trailingDiffs, 1)
+	assert.Equal(t, "decode_error", trailingDiffs[0].Kind)
+	assert.True(t, trailingDiffs[0].Breaking)
+}
+
+func TestComparePayloads_ConnectJSONAndProtoTrailers(t *testing.T) {
+	makeFrame := func(flags byte, payload []byte) []byte {
+		out := make([]byte, 5+len(payload))
+		out[0] = flags
+		binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+		copy(out[5:], payload)
+		return out
+	}
+
+	// 1. Connect streaming JSON envelope with identical messages and {} end-of-stream frame passes
+	msgFrame := makeFrame(0x00, []byte(`{"id":"ord-1","status":"paid"}`))
+	okTrailer := makeFrame(0x02, []byte(`{}`))
+	errTrailer := makeFrame(0x02, []byte(`{"error":{"code":"internal","message":"db timeout"}}`))
+
+	baseStream := append(append([]byte{}, msgFrame...), okTrailer...)
+	prevStreamOK := append(append([]byte{}, msgFrame...), okTrailer...)
+	prevStreamErr := append(append([]byte{}, msgFrame...), errTrailer...)
+
+	protoOK, diffsOK := ComparePayloads("application/connect+json", "application/connect+json", baseStream, prevStreamOK, DiffOptions{})
+	assert.Equal(t, ProtocolJSON, protoOK)
+	assert.Empty(t, diffsOK)
+
+	// When preview trailer has an RPC error, verification fails with status_mismatch
+	_, diffsErr := ComparePayloads("application/connect+json", "application/connect+json", baseStream, prevStreamErr, DiffOptions{})
+	require.Len(t, diffsErr, 1)
+	assert.Equal(t, "$.rpc_status", diffsErr[0].Path)
+	assert.Equal(t, "status_mismatch", diffsErr[0].Kind)
+	assert.True(t, diffsErr[0].Breaking)
+
+	// 2. gRPC-Web binary protobuf with nonzero grpc-status trailer in preview fails
+	var protoPayload []byte
+	protoPayload = protowire.AppendTag(protoPayload, 1, protowire.VarintType)
+	protoPayload = protowire.AppendVarint(protoPayload, 7)
+
+	baseWeb := append(makeFrame(0x00, protoPayload), makeFrame(0x80, []byte("grpc-status: 0\r\n"))...)
+	prevWeb := append(makeFrame(0x00, protoPayload), makeFrame(0x80, []byte("grpc-status: 13\r\ngrpc-message: internal\r\n"))...)
+
+	_, webDiffs := ComparePayloads("application/grpc-web+proto", "application/grpc-web+proto", baseWeb, prevWeb, DiffOptions{})
+	require.Len(t, webDiffs, 1)
+	assert.Equal(t, "proto.rpc_status", webDiffs[0].Path)
+	assert.Equal(t, "status_mismatch", webDiffs[0].Kind)
+	assert.True(t, webDiffs[0].Breaking)
+}
+
+func TestComparePayloads_UTF8ProtoFallbackAndRepeatedNestedWire(t *testing.T) {
+	// 1. Valid UTF-8 protobuf wire payload (field 1 string = "abc") with application/octet-stream and empty preview body
+	var utf8Proto []byte
+	utf8Proto = protowire.AppendTag(utf8Proto, 1, protowire.BytesType)
+	utf8Proto = protowire.AppendString(utf8Proto, "abc")
+
+	protocol, diffs := ComparePayloads("application/octet-stream", "application/octet-stream", utf8Proto, nil, DiffOptions{})
+	assert.Equal(t, ProtocolProtobuf, protocol)
+	require.Len(t, diffs, 1)
+	assert.Equal(t, "proto.field_1", diffs[0].Path)
+	assert.Equal(t, "missing_field", diffs[0].Kind)
+
+	// 2. Repeated nested wire messages preserve occurrence boundaries
+	var sub1, sub2 []byte
+	sub1 = protowire.AppendTag(sub1, 1, protowire.VarintType)
+	sub1 = protowire.AppendVarint(sub1, 10)
+	sub1 = protowire.AppendTag(sub1, 2, protowire.VarintType)
+	sub1 = protowire.AppendVarint(sub1, 20)
+
+	sub2 = protowire.AppendTag(sub2, 1, protowire.VarintType)
+	sub2 = protowire.AppendVarint(sub2, 10)
+
+	// Baseline has [sub1, sub2]; Preview swaps them [sub2, sub1]
+	var baseRepeated, prevRepeated []byte
+	baseRepeated = protowire.AppendTag(baseRepeated, 3, protowire.BytesType)
+	baseRepeated = protowire.AppendBytes(baseRepeated, sub1)
+	baseRepeated = protowire.AppendTag(baseRepeated, 3, protowire.BytesType)
+	baseRepeated = protowire.AppendBytes(baseRepeated, sub2)
+
+	prevRepeated = protowire.AppendTag(prevRepeated, 3, protowire.BytesType)
+	prevRepeated = protowire.AppendBytes(prevRepeated, sub2)
+	prevRepeated = protowire.AppendTag(prevRepeated, 3, protowire.BytesType)
+	prevRepeated = protowire.AppendBytes(prevRepeated, sub1)
+
+	_, repDiffs := ComparePayloads("application/proto", "application/proto", baseRepeated, prevRepeated, DiffOptions{CompareValues: true})
+	require.NotEmpty(t, repDiffs)
+	assert.Equal(t, "proto.field_3[0].field_2", repDiffs[0].Path)
+	assert.Equal(t, "missing_field", repDiffs[0].Kind)
+}

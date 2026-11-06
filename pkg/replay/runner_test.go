@@ -98,12 +98,100 @@ func TestRunner_ReplayJSONAndProtobuf(t *testing.T) {
 	assert.Contains(t, tableBuf.String(), "charge-rpc")
 	assert.Contains(t, tableBuf.String(), "[FAIL]")
 
-	FormatMarkdown(&mdBuf, report)
+	require.NoError(t, FormatMarkdown(&mdBuf, report))
 	assert.Contains(t, mdBuf.String(), "Diverge Traffic Replay Failed: pr-42")
 	assert.Contains(t, mdBuf.String(), "`proto.field_2`")
 
 	require.NoError(t, FormatJSON(&jsonBuf, report))
 	assert.Contains(t, jsonBuf.String(), `"breakingDiffs": 1`)
+}
+
+func TestRunner_StripsRecordedPreviewHeadersFromBaselineAndChecksGRPCStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isPreview := r.Header.Get("x-diverge-env") == "pr-42" || r.Header.Get("baggage") == "diverge.env=pr-42"
+
+		switch r.URL.Path {
+		case "/api/v1/recorded":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if isPreview {
+				_, _ = w.Write([]byte(`{"env":"preview"}`))
+			} else {
+				_, _ = w.Write([]byte(`{"env":"baseline"}`))
+			}
+
+		case "/acme.v1.Health/Check":
+			w.Header().Set("Content-Type", "application/grpc+proto")
+			var msg []byte
+			msg = protowire.AppendTag(msg, 1, protowire.VarintType)
+			msg = protowire.AppendVarint(msg, 1)
+			if isPreview {
+				w.Header().Set("Grpc-Status", "14") // UNAVAILABLE
+			} else {
+				w.Header().Set("Grpc-Status", "0")
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(msg)
+
+		case "/redirect-ssrf":
+			http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+		}
+	}))
+	defer srv.Close()
+
+	entries := []RequestEntry{
+		{
+			ID:     "recorded-har-header",
+			Method: "GET",
+			Path:   "/api/v1/recorded",
+			Headers: map[string]string{
+				"x-diverge-env": "pr-42",
+				"baggage":       "diverge.env=pr-42,user=alice",
+			},
+		},
+		{
+			ID:     "grpc-status-diff",
+			Method: "POST",
+			Path:   "/acme.v1.Health/Check",
+		},
+		{
+			ID:     "redirect-ssrf",
+			Method: "GET",
+			Path:   "/redirect-ssrf",
+		},
+	}
+
+	runner := NewRunner(Config{
+		Environment:        "pr-42",
+		BaseURL:            srv.URL,
+		HeaderKey:          "x-diverge-env",
+		HeaderValue:        "pr-42",
+		FailOnStatusDiff:   true,
+		FailOnContractDiff: true,
+		DiffOptions: DiffOptions{
+			CompareValues: true,
+		},
+	})
+
+	report, err := runner.Run(context.Background(), entries)
+	require.NoError(t, err)
+	assert.False(t, report.Passed)
+	require.Len(t, report.Results, 3)
+
+	// Entry 0: baseline had x-diverge-env stripped so it received {"env":"baseline"} vs preview {"env":"preview"}
+	assert.False(t, report.Results[0].Passed)
+	require.Len(t, report.Results[0].ContractDiffs, 1)
+	assert.Equal(t, `"baseline"`, report.Results[0].ContractDiffs[0].Baseline)
+	assert.Equal(t, `"preview"`, report.Results[0].ContractDiffs[0].Preview)
+
+	// Entry 1: identical protobuf messages, but preview returned Grpc-Status: 14
+	assert.False(t, report.Results[1].Passed)
+	assert.False(t, report.Results[1].StatusMatch)
+	assert.Contains(t, report.Results[1].FailureReasons[0], "gRPC status mismatch")
+
+	// Entry 2: redirect to metadata IP blocked by CheckRedirect
+	assert.False(t, report.Results[2].Passed)
+	assert.Contains(t, report.Results[2].FailureReasons[0], "redirect target prohibited")
 }
 
 func TestResolveEntryURL_RewriteAndSSRF(t *testing.T) {

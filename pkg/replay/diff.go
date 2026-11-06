@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -110,6 +112,25 @@ func IsJSONContentType(contentType string) bool {
 	return strings.HasSuffix(mediaType, "+json")
 }
 
+// IsFramedJSONContentType reports whether the Content-Type uses 5-byte length-prefixed JSON framing (Connect streaming JSON or gRPC-Web JSON).
+func IsFramedJSONContentType(contentType string) bool {
+	mediaType := normalizeMediaType(contentType)
+	switch mediaType {
+	case "application/connect+json",
+		"application/grpc-web+json",
+		"application/grpc+json":
+		return true
+	}
+	return false
+}
+
+// isExplicitTextContentType reports whether the Content-Type header explicitly declares a non-JSON text/* media type.
+func isExplicitTextContentType(contentType string) bool {
+	mediaType := normalizeMediaType(contentType)
+	return strings.HasPrefix(mediaType, "text/") && mediaType != "text/json"
+}
+
+// normalizeMediaType extracts the lowercase media type without parameters from a Content-Type header value.
 func normalizeMediaType(contentType string) string {
 	raw := strings.ToLower(strings.TrimSpace(contentType))
 	if idx := strings.IndexByte(raw, ';'); idx >= 0 {
@@ -120,48 +141,135 @@ func normalizeMediaType(contentType string) string {
 
 // UnwrapProtoEnvelope extracts the raw protobuf message bytes from a gRPC or Connect length-prefixed frame if present.
 func UnwrapProtoEnvelope(contentType string, raw []byte) ([]byte, error) {
+	payload, _, err := unwrapEnvelopeFrames(contentType, raw)
+	return payload, err
+}
+
+// unwrapEnvelopeFrames extracts concatenated message frame bytes and the normalized RPC trailer status from a 5-byte framed envelope.
+func unwrapEnvelopeFrames(contentType string, raw []byte) ([]byte, string, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		return nil, "ok", nil
 	}
-	framed := IsFramedProtoContentType(contentType)
+	framed := IsFramedProtoContentType(contentType) || hasValidEnvelopeFrameSequence(raw)
 	if !framed {
-		// Also auto-detect a single uncompressed 5-byte frame when raw[0] == 0 and length matches exactly
-		if len(raw) >= 5 && raw[0] == 0 {
-			frameLen := int(binary.BigEndian.Uint32(raw[1:5]))
-			if frameLen > 0 && frameLen == len(raw)-5 {
-				framed = true
-			}
-		}
-	}
-	if !framed {
-		return raw, nil
+		return raw, "ok", nil
 	}
 
 	var out bytes.Buffer
+	trailerStatus := "ok"
 	buf := raw
 	for len(buf) > 0 {
 		if len(buf) < 5 {
-			return nil, fmt.Errorf("truncated gRPC/Connect frame header (%d bytes remaining)", len(buf))
+			return nil, "", fmt.Errorf("truncated gRPC/Connect frame header (%d bytes remaining)", len(buf))
 		}
 		flags := buf[0]
 		frameLen := int(binary.BigEndian.Uint32(buf[1:5]))
 		buf = buf[5:]
 		if frameLen > len(buf) {
-			return nil, fmt.Errorf("truncated gRPC/Connect frame payload: expected %d bytes, got %d", frameLen, len(buf))
+			return nil, "", fmt.Errorf("truncated gRPC/Connect frame payload: expected %d bytes, got %d", frameLen, len(buf))
 		}
 		framePayload := buf[:frameLen]
 		buf = buf[frameLen:]
 
-		// Skip Connect end-of-stream JSON trailer frames (0x02) and gRPC-Web trailer frames (0x80)
-		if flags&0x82 != 0 {
-			continue
-		}
 		if flags&0x01 != 0 {
-			return nil, fmt.Errorf("compressed gRPC/Connect frame (flags=0x%02x) cannot be decoded without decompression", flags)
+			return nil, "", fmt.Errorf("compressed gRPC/Connect frame (flags=0x%02x) cannot be decoded without decompression", flags)
+		}
+
+		// Parse Connect end-of-stream JSON trailer frames (0x02) and gRPC-Web trailer frames (0x80)
+		if flags&0x82 != 0 {
+			status, err := parseTrailerFrameStatus(flags, framePayload)
+			if err != nil {
+				return nil, "", err
+			}
+			if status != "ok" {
+				trailerStatus = status
+			}
+			continue
 		}
 		_, _ = out.Write(framePayload)
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), trailerStatus, nil
+}
+
+// hasValidEnvelopeFrameSequence reports whether raw consists of one or more valid 5-byte length-prefixed uncompressed gRPC/Connect frames.
+func hasValidEnvelopeFrameSequence(raw []byte) bool {
+	if len(raw) < 5 {
+		return false
+	}
+	buf := raw
+	frameCount := 0
+	for len(buf) > 0 {
+		if len(buf) < 5 {
+			return false
+		}
+		flags := buf[0]
+		if flags != 0x00 && flags != 0x02 && flags != 0x80 {
+			return false
+		}
+		frameLen := int(binary.BigEndian.Uint32(buf[1:5]))
+		buf = buf[5:]
+		if frameLen < 0 || frameLen > len(buf) {
+			return false
+		}
+		if frameCount == 0 && flags == 0x00 && frameLen == 0 && len(buf) > 0 {
+			return false
+		}
+		buf = buf[frameLen:]
+		frameCount++
+	}
+	return frameCount > 0 && int(binary.BigEndian.Uint32(raw[1:5])) > 0
+}
+
+// parseTrailerFrameStatus extracts the RPC status from a Connect end-of-stream (0x02) or gRPC-Web (0x80) trailer frame.
+func parseTrailerFrameStatus(flags byte, payload []byte) (string, error) {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return "ok", nil
+	}
+	if flags&0x02 != 0 {
+		var endStream struct {
+			Error *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(trimmed, &endStream); err != nil {
+			return "", fmt.Errorf("invalid Connect end-of-stream frame JSON: %w", err)
+		}
+		if endStream.Error != nil {
+			code := strings.TrimSpace(endStream.Error.Code)
+			msg := strings.TrimSpace(endStream.Error.Message)
+			if code != "" && msg != "" {
+				return fmt.Sprintf("connect-error:%s (%s)", code, msg), nil
+			}
+			if code != "" {
+				return "connect-error:" + code, nil
+			}
+			if msg != "" {
+				return "connect-error:" + msg, nil
+			}
+			return "connect-error", nil
+		}
+		return "ok", nil
+	}
+	if flags&0x80 != 0 {
+		lines := strings.Split(string(trimmed), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[0]), "grpc-status") {
+				val := strings.TrimSpace(parts[1])
+				if val != "" && val != "0" {
+					return "grpc-status:" + val, nil
+				}
+			}
+		}
+		return "ok", nil
+	}
+	return "ok", nil
 }
 
 // ComparePayloads compares baseline and preview HTTP response bodies and returns the detected protocol and contract diffs.
@@ -172,19 +280,31 @@ func ComparePayloads(baseContentType, prevContentType string, baseBody, prevBody
 	}
 
 	if IsProtobufContentType(baseContentType) || IsProtobufContentType(prevContentType) ||
-		(opts.ProtoMessage != "" && !looksLikeJSON(baseBody) && !looksLikeJSON(prevBody)) {
+		(opts.ProtoMessage != "" && !looksLikeJSON(baseBody) && !looksLikeJSON(prevBody) &&
+			!isFramedConnectJSONPayload(baseContentType, baseBody) && !isFramedConnectJSONPayload(prevContentType, prevBody)) {
 		return compareProtobufPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
 	}
 
 	if IsJSONContentType(baseContentType) || IsJSONContentType(prevContentType) ||
+		isFramedConnectJSONPayload(baseContentType, baseBody) || isFramedConnectJSONPayload(prevContentType, prevBody) ||
 		(looksLikeJSON(baseBody) && looksLikeJSON(prevBody)) {
-		return ProtocolJSON, compareJSONPayloads(baseBody, prevBody, opts)
+		return ProtocolJSON, compareJSONPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
 	}
 
-	// Fallback: if neither JSON nor Protobuf Content-Type was declared, check if both bodies are valid non-empty Protobuf wire messages
-	if len(baseBody) > 0 && len(prevBody) > 0 && !utf8.Valid(baseBody) {
-		if _, err1 := parseProtoWireMessage(baseBody, 0); err1 == nil {
-			if _, err2 := parseProtoWireMessage(prevBody, 0); err2 == nil {
+	// Fallback: if neither JSON nor explicit text/* Content-Type was declared, check if baseline or preview
+	// is a valid non-empty Protobuf wire message (including valid UTF-8 wire bytes or an empty preview message).
+	if !isExplicitTextContentType(baseContentType) && !isExplicitTextContentType(prevContentType) {
+		if len(baseBody) > 0 {
+			if baseFields, err1 := parseProtoWireMessage(baseBody, 0); err1 == nil && len(baseFields) > 0 {
+				if len(prevBody) == 0 {
+					return compareProtobufPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
+				}
+				if prevFields, err2 := parseProtoWireMessage(prevBody, 0); err2 == nil && len(prevFields) > 0 {
+					return compareProtobufPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
+				}
+			}
+		} else if len(prevBody) > 0 {
+			if prevFields, err2 := parseProtoWireMessage(prevBody, 0); err2 == nil && len(prevFields) > 0 {
 				return compareProtobufPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
 			}
 		}
@@ -204,6 +324,7 @@ func ComparePayloads(baseContentType, prevContentType string, baseBody, prevBody
 	return ProtocolText, diffs
 }
 
+// looksLikeJSON reports whether data starts with a JSON object or array delimiter after trimming whitespace.
 func looksLikeJSON(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
@@ -213,15 +334,86 @@ func looksLikeJSON(data []byte) bool {
 	return first == '{' || first == '['
 }
 
-func compareJSONPayloads(baseBody, prevBody []byte, opts DiffOptions) []ContractDiff {
-	var baseVal, prevVal any
-	baseDec := json.NewDecoder(bytes.NewReader(baseBody))
-	baseDec.UseNumber()
-	baseErr := baseDec.Decode(&baseVal)
+// isFramedConnectJSONPayload reports whether the response uses 5-byte Connect/gRPC-Web framing around JSON payloads.
+func isFramedConnectJSONPayload(contentType string, raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	if IsFramedJSONContentType(contentType) && !looksLikeJSON(raw) {
+		return true
+	}
+	if !hasValidEnvelopeFrameSequence(raw) {
+		return false
+	}
+	frames, _, err := unwrapJSONEnvelopeFrames(raw)
+	if err != nil || len(frames) == 0 {
+		return false
+	}
+	return looksLikeJSON(frames[0])
+}
 
-	prevDec := json.NewDecoder(bytes.NewReader(prevBody))
-	prevDec.UseNumber()
-	prevErr := prevDec.Decode(&prevVal)
+// unwrapJSONEnvelopeFrames extracts individual JSON message frames and the normalized trailer status from a 5-byte framed Connect/gRPC-Web stream.
+func unwrapJSONEnvelopeFrames(raw []byte) ([][]byte, string, error) {
+	var frames [][]byte
+	trailerStatus := "ok"
+	buf := raw
+	for len(buf) > 0 {
+		if len(buf) < 5 {
+			return nil, "", fmt.Errorf("truncated Connect JSON frame header (%d bytes remaining)", len(buf))
+		}
+		flags := buf[0]
+		frameLen := int(binary.BigEndian.Uint32(buf[1:5]))
+		buf = buf[5:]
+		if frameLen > len(buf) {
+			return nil, "", fmt.Errorf("truncated Connect JSON frame payload: expected %d bytes, got %d", frameLen, len(buf))
+		}
+		framePayload := buf[:frameLen]
+		buf = buf[frameLen:]
+
+		if flags&0x01 != 0 {
+			return nil, "", fmt.Errorf("compressed Connect JSON frame (flags=0x%02x) cannot be decoded without decompression", flags)
+		}
+		if flags&0x82 != 0 {
+			status, err := parseTrailerFrameStatus(flags, framePayload)
+			if err != nil {
+				return nil, "", err
+			}
+			if status != "ok" {
+				trailerStatus = status
+			}
+			continue
+		}
+		frames = append(frames, framePayload)
+	}
+	return frames, trailerStatus, nil
+}
+
+// decodeSingleJSONValue decodes a single JSON value from data and rejects any trailing non-whitespace tokens.
+func decodeSingleJSONValue(data []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var val any
+	if err := dec.Decode(&val); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return val, errors.New("unexpected trailing data after top-level JSON value")
+		}
+		return val, fmt.Errorf("invalid trailing data after top-level JSON value: %w", err)
+	}
+	return val, nil
+}
+
+// compareJSONPayloads compares JSON payloads, unwrapping Connect streaming JSON envelopes when present.
+func compareJSONPayloads(baseContentType, prevContentType string, baseBody, prevBody []byte, opts DiffOptions) []ContractDiff {
+	if isFramedConnectJSONPayload(baseContentType, baseBody) || isFramedConnectJSONPayload(prevContentType, prevBody) {
+		return compareFramedJSONPayloads(baseContentType, prevContentType, baseBody, prevBody, opts)
+	}
+
+	baseVal, baseErr := decodeSingleJSONValue(baseBody)
+	prevVal, prevErr := decodeSingleJSONValue(prevBody)
 
 	if baseErr != nil || prevErr != nil {
 		var diffs []ContractDiff
@@ -251,6 +443,78 @@ func compareJSONPayloads(baseBody, prevBody []byte, opts DiffOptions) []Contract
 	return diffs
 }
 
+// compareFramedJSONPayloads unwraps and compares Connect / gRPC-Web framed JSON responses and their end-of-stream statuses.
+func compareFramedJSONPayloads(baseContentType, prevContentType string, baseBody, prevBody []byte, opts DiffOptions) []ContractDiff {
+	extractFrames := func(ct string, body []byte) ([]any, string, error) {
+		if isFramedConnectJSONPayload(ct, body) || hasValidEnvelopeFrameSequence(body) {
+			rawFrames, status, err := unwrapJSONEnvelopeFrames(body)
+			if err != nil {
+				return nil, "", err
+			}
+			vals := make([]any, 0, len(rawFrames))
+			for i, f := range rawFrames {
+				v, decErr := decodeSingleJSONValue(f)
+				if decErr != nil {
+					return nil, "", fmt.Errorf("frame %d invalid JSON: %w", i, decErr)
+				}
+				vals = append(vals, v)
+			}
+			return vals, status, nil
+		}
+		if len(bytes.TrimSpace(body)) == 0 {
+			return nil, "ok", nil
+		}
+		v, err := decodeSingleJSONValue(body)
+		if err != nil {
+			return nil, "", err
+		}
+		return []any{v}, "ok", nil
+	}
+
+	baseMsgs, baseTrailer, baseErr := extractFrames(baseContentType, baseBody)
+	prevMsgs, prevTrailer, prevErr := extractFrames(prevContentType, prevBody)
+	if baseErr != nil || prevErr != nil {
+		var diffs []ContractDiff
+		if baseErr != nil {
+			diffs = append(diffs, ContractDiff{
+				Path:     "$",
+				Kind:     "decode_error",
+				Baseline: fmt.Sprintf("invalid Connect JSON envelope: %v", baseErr),
+				Preview:  "valid",
+				Breaking: true,
+			})
+		}
+		if prevErr != nil {
+			diffs = append(diffs, ContractDiff{
+				Path:     "$",
+				Kind:     "decode_error",
+				Baseline: "valid",
+				Preview:  fmt.Sprintf("invalid Connect JSON envelope: %v", prevErr),
+				Breaking: true,
+			})
+		}
+		return diffs
+	}
+
+	var diffs []ContractDiff
+	if len(baseMsgs) == 1 && len(prevMsgs) == 1 {
+		diffJSONValues("$", baseMsgs[0], prevMsgs[0], opts, &diffs)
+	} else if len(baseMsgs) > 0 || len(prevMsgs) > 0 {
+		diffJSONValues("$", baseMsgs, prevMsgs, opts, &diffs)
+	}
+	if baseTrailer != prevTrailer {
+		diffs = append(diffs, ContractDiff{
+			Path:     "$.rpc_status",
+			Kind:     "status_mismatch",
+			Baseline: baseTrailer,
+			Preview:  prevTrailer,
+			Breaking: true,
+		})
+	}
+	return diffs
+}
+
+// diffJSONValues recursively compares baseline and preview decoded JSON values.
 func diffJSONValues(path string, baseVal, prevVal any, opts DiffOptions, diffs *[]ContractDiff) {
 	if shouldIgnoreField(path, opts.IgnoreFields) {
 		return
@@ -328,17 +592,17 @@ func diffJSONValues(path string, baseVal, prevVal any, opts DiffOptions, diffs *
 			})
 		}
 		if len(bTyped) > 0 && len(pTyped) > 0 {
-			if opts.CompareValues {
-				limit := len(bTyped)
-				if len(pTyped) < limit {
-					limit = len(pTyped)
+			limit := len(bTyped)
+			if len(pTyped) < limit {
+				limit = len(pTyped)
+			}
+			for i := 0; i < limit; i++ {
+				diffJSONValues(fmt.Sprintf("%s[%d]", path, i), bTyped[i], pTyped[i], opts, diffs)
+			}
+			if !opts.CompareValues && len(pTyped) > len(bTyped) {
+				for i := len(bTyped); i < len(pTyped); i++ {
+					diffJSONValues(fmt.Sprintf("%s[%d]", path, i), bTyped[0], pTyped[i], opts, diffs)
 				}
-				for i := 0; i < limit; i++ {
-					diffJSONValues(fmt.Sprintf("%s[%d]", path, i), bTyped[i], pTyped[i], opts, diffs)
-				}
-			} else {
-				// Structural schema comparison checks representative first element
-				diffJSONValues(path+"[0]", bTyped[0], pTyped[0], opts, diffs)
 			}
 		}
 
@@ -359,6 +623,7 @@ func diffJSONValues(path string, baseVal, prevVal any, opts DiffOptions, diffs *
 	}
 }
 
+// describeJSONType returns a human-readable JSON type name for v.
 func describeJSONType(v any) string {
 	if v == nil {
 		return "null"
@@ -379,6 +644,7 @@ func describeJSONType(v any) string {
 	}
 }
 
+// formatJSONScalar formats a scalar JSON value for diff reporting.
 func formatJSONScalar(v any) string {
 	switch val := v.(type) {
 	case nil:
@@ -394,9 +660,10 @@ func formatJSONScalar(v any) string {
 	}
 }
 
+// compareProtobufPayloads unwraps and compares binary Protobuf, gRPC, or Connect-Proto payloads.
 func compareProtobufPayloads(baseContentType, prevContentType string, baseBody, prevBody []byte, opts DiffOptions) (string, []ContractDiff) {
-	baseRaw, baseUnwrapErr := UnwrapProtoEnvelope(baseContentType, baseBody)
-	prevRaw, prevUnwrapErr := UnwrapProtoEnvelope(prevContentType, prevBody)
+	baseRaw, baseTrailerStatus, baseUnwrapErr := unwrapEnvelopeFrames(baseContentType, baseBody)
+	prevRaw, prevTrailerStatus, prevUnwrapErr := unwrapEnvelopeFrames(prevContentType, prevBody)
 	if baseUnwrapErr != nil || prevUnwrapErr != nil {
 		var diffs []ContractDiff
 		if baseUnwrapErr != nil {
@@ -418,6 +685,19 @@ func compareProtobufPayloads(baseContentType, prevContentType string, baseBody, 
 			})
 		}
 		return ProtocolProtobuf, diffs
+	}
+
+	appendTrailerDiff := func(diffs []ContractDiff) []ContractDiff {
+		if baseTrailerStatus != prevTrailerStatus {
+			diffs = append(diffs, ContractDiff{
+				Path:     "proto.rpc_status",
+				Kind:     "status_mismatch",
+				Baseline: baseTrailerStatus,
+				Preview:  prevTrailerStatus,
+				Breaking: true,
+			})
+		}
+		return diffs
 	}
 
 	// 1. If a FileDescriptorSet and message type are configured, perform schema-aware reflection comparison
@@ -443,7 +723,7 @@ func compareProtobufPayloads(baseContentType, prevContentType string, baseBody, 
 				Breaking: true,
 			}}
 		}
-		return ProtocolProtobufTyped, compareDynamicProtoMessages(msgDesc, baseRaw, prevRaw, opts)
+		return ProtocolProtobufTyped, appendTrailerDiff(compareDynamicProtoMessages(msgDesc, baseRaw, prevRaw, opts))
 	}
 
 	// 2. Zero-config wire-level Protobuf decoding via protowire
@@ -474,9 +754,10 @@ func compareProtobufPayloads(baseContentType, prevContentType string, baseBody, 
 
 	var diffs []ContractDiff
 	diffProtoWireMessages("proto", baseWire, prevWire, opts, &diffs)
-	return ProtocolProtobuf, diffs
+	return ProtocolProtobuf, appendTrailerDiff(diffs)
 }
 
+// compareDynamicProtoMessages unmarshals baseline and preview bytes using msgDesc and compares their reflected fields.
 func compareDynamicProtoMessages(msgDesc protoreflect.MessageDescriptor, baseRaw, prevRaw []byte, opts DiffOptions) []ContractDiff {
 	baseMsg := dynamicpb.NewMessage(msgDesc)
 	prevMsg := dynamicpb.NewMessage(msgDesc)
@@ -511,6 +792,7 @@ func compareDynamicProtoMessages(msgDesc protoreflect.MessageDescriptor, baseRaw
 	return diffs
 }
 
+// diffReflectedProtoMessages recursively compares two reflected Protobuf messages against their schema.
 func diffReflectedProtoMessages(path string, baseMsg, prevMsg protoreflect.Message, opts DiffOptions, diffs *[]ContractDiff) {
 	if shouldIgnoreField(path, opts.IgnoreFields) {
 		return
@@ -570,16 +852,17 @@ func diffReflectedProtoMessages(path string, baseMsg, prevMsg protoreflect.Messa
 				})
 			}
 			if fd.Kind() == protoreflect.MessageKind && bList.Len() > 0 && pList.Len() > 0 {
-				if opts.CompareValues {
-					limit := bList.Len()
-					if pList.Len() < limit {
-						limit = pList.Len()
+				limit := bList.Len()
+				if pList.Len() < limit {
+					limit = pList.Len()
+				}
+				for idx := 0; idx < limit; idx++ {
+					diffReflectedProtoMessages(fmt.Sprintf("%s[%d]", childPath, idx), bList.Get(idx).Message(), pList.Get(idx).Message(), opts, diffs)
+				}
+				if !opts.CompareValues && pList.Len() > bList.Len() {
+					for idx := bList.Len(); idx < pList.Len(); idx++ {
+						diffReflectedProtoMessages(fmt.Sprintf("%s[%d]", childPath, idx), bList.Get(0).Message(), pList.Get(idx).Message(), opts, diffs)
 					}
-					for idx := 0; idx < limit; idx++ {
-						diffReflectedProtoMessages(fmt.Sprintf("%s[%d]", childPath, idx), bList.Get(idx).Message(), pList.Get(idx).Message(), opts, diffs)
-					}
-				} else {
-					diffReflectedProtoMessages(childPath+"[0]", bList.Get(0).Message(), pList.Get(0).Message(), opts, diffs)
 				}
 			} else if opts.CompareValues {
 				limit := bList.Len()
@@ -604,17 +887,7 @@ func diffReflectedProtoMessages(path string, baseMsg, prevMsg protoreflect.Messa
 		}
 
 		if fd.IsMap() {
-			bMap := bVal.Map()
-			pMap := pVal.Map()
-			if opts.CompareValues && bMap.Len() != pMap.Len() {
-				*diffs = append(*diffs, ContractDiff{
-					Path:     childPath,
-					Kind:     "count_mismatch",
-					Baseline: fmt.Sprintf("len=%d", bMap.Len()),
-					Preview:  fmt.Sprintf("len=%d", pMap.Len()),
-					Breaking: true,
-				})
-			}
+			diffReflectedProtoMaps(childPath, fd, bVal.Map(), pVal.Map(), opts, diffs)
 			continue
 		}
 
@@ -646,6 +919,99 @@ func diffReflectedProtoMessages(path string, baseMsg, prevMsg protoreflect.Messa
 	}
 }
 
+// diffReflectedProtoMaps compares two reflected Protobuf map fields by key and value.
+func diffReflectedProtoMaps(path string, fd protoreflect.FieldDescriptor, bMap, pMap protoreflect.Map, opts DiffOptions, diffs *[]ContractDiff) {
+	if opts.CompareValues && bMap.Len() != pMap.Len() {
+		*diffs = append(*diffs, ContractDiff{
+			Path:     path,
+			Kind:     "count_mismatch",
+			Baseline: fmt.Sprintf("len=%d", bMap.Len()),
+			Preview:  fmt.Sprintf("len=%d", pMap.Len()),
+			Breaking: true,
+		})
+	}
+
+	keyByRepr := make(map[string]protoreflect.MapKey, bMap.Len()+pMap.Len())
+	bMap.Range(func(k protoreflect.MapKey, _ protoreflect.Value) bool {
+		keyByRepr[k.String()] = k
+		return true
+	})
+	pMap.Range(func(k protoreflect.MapKey, _ protoreflect.Value) bool {
+		keyByRepr[k.String()] = k
+		return true
+	})
+
+	keyReprs := make([]string, 0, len(keyByRepr))
+	for kr := range keyByRepr {
+		keyReprs = append(keyReprs, kr)
+	}
+	sort.Strings(keyReprs)
+
+	valDesc := fd.MapValue()
+	valTypeStr := describeProtoFieldDescriptor(valDesc)
+
+	for _, kr := range keyReprs {
+		mk := keyByRepr[kr]
+		entryPath := fmt.Sprintf("%s[%s]", path, formatProtoScalar(fd.MapKey(), mk.Value()))
+		if shouldIgnoreField(entryPath, opts.IgnoreFields) || shouldIgnoreField(path+"."+kr, opts.IgnoreFields) {
+			continue
+		}
+
+		bEntry := bMap.Get(mk)
+		pEntry := pMap.Get(mk)
+		bHas := bEntry.IsValid()
+		pHas := pEntry.IsValid()
+
+		if bHas && !pHas {
+			if opts.CompareValues || valDesc.Kind() == protoreflect.MessageKind {
+				*diffs = append(*diffs, ContractDiff{
+					Path:     entryPath,
+					Kind:     "missing_field",
+					Baseline: valTypeStr,
+					Preview:  "absent",
+					Breaking: true,
+				})
+			}
+			continue
+		}
+		if !bHas && pHas {
+			if opts.CompareValues || opts.FailOnExtraFields || valDesc.Kind() == protoreflect.MessageKind {
+				*diffs = append(*diffs, ContractDiff{
+					Path:     entryPath,
+					Kind:     "extra_field",
+					Baseline: "absent",
+					Preview:  valTypeStr,
+					Breaking: opts.CompareValues || opts.FailOnExtraFields,
+				})
+			}
+			continue
+		}
+		if !bHas && !pHas {
+			continue
+		}
+
+		if valDesc.Kind() == protoreflect.MessageKind {
+			diffReflectedProtoMessages(entryPath, bEntry.Message(), pEntry.Message(), opts, diffs)
+			continue
+		}
+
+		if opts.CompareValues {
+			bStr := formatProtoScalar(valDesc, bEntry)
+			pStr := formatProtoScalar(valDesc, pEntry)
+			if bStr != pStr {
+				*diffs = append(*diffs, ContractDiff{
+					Path:     entryPath,
+					Kind:     "value_mismatch",
+					Baseline: truncateSample(bStr, 80),
+					Preview:  truncateSample(pStr, 80),
+					Breaking: true,
+				})
+			}
+		}
+	}
+}
+
+// protoFieldPresent reports whether a field is populated on msg.
 func protoFieldPresent(msg protoreflect.Message, fd protoreflect.FieldDescriptor) bool {
 	if fd.IsList() {
 		return msg.Get(fd).List().Len() > 0
@@ -656,6 +1022,7 @@ func protoFieldPresent(msg protoreflect.Message, fd protoreflect.FieldDescriptor
 	return msg.Has(fd)
 }
 
+// describeProtoFieldDescriptor returns a human-readable type description for fd.
 func describeProtoFieldDescriptor(fd protoreflect.FieldDescriptor) string {
 	kind := fd.Kind().String()
 	if fd.Kind() == protoreflect.MessageKind {
@@ -672,6 +1039,7 @@ func describeProtoFieldDescriptor(fd protoreflect.FieldDescriptor) string {
 	return fmt.Sprintf("%s (#%d)", kind, fd.Number())
 }
 
+// formatProtoScalar formats a reflected Protobuf scalar value for diff reporting.
 func formatProtoScalar(fd protoreflect.FieldDescriptor, v protoreflect.Value) string {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
@@ -690,13 +1058,15 @@ func formatProtoScalar(fd protoreflect.FieldDescriptor, v protoreflect.Value) st
 }
 
 type wireFieldSummary struct {
-	Number   protowire.Number
-	WireType string
-	Count    int
-	Values   []string
-	Nested   map[protowire.Number]*wireFieldSummary
+	Number         protowire.Number
+	WireType       string
+	Count          int
+	Values         []string
+	Nested         map[protowire.Number]*wireFieldSummary
+	NestedMessages []map[protowire.Number]*wireFieldSummary
 }
 
+// parseProtoWireMessage decodes raw Protobuf wire bytes into a map of field tag summaries without requiring a schema.
 func parseProtoWireMessage(b []byte, depth int) (map[protowire.Number]*wireFieldSummary, error) {
 	fields := make(map[protowire.Number]*wireFieldSummary)
 	for len(b) > 0 {
@@ -788,6 +1158,7 @@ func parseProtoWireMessage(b []byte, depth int) (map[protowire.Number]*wireField
 			if (entry.WireType == "bytes/message" && wtypeStr == "bytes") || (entry.WireType == "bytes" && wtypeStr == "bytes/message") {
 				entry.WireType = "bytes"
 				entry.Nested = nil
+				entry.NestedMessages = nil
 			} else {
 				entry.WireType = entry.WireType + "|" + wtypeStr
 			}
@@ -796,16 +1167,18 @@ func parseProtoWireMessage(b []byte, depth int) (map[protowire.Number]*wireField
 		entry.Count++
 		entry.Values = append(entry.Values, valRepr)
 		if nested != nil && entry.WireType == "bytes/message" {
+			entry.NestedMessages = append(entry.NestedMessages, nested)
 			if entry.Nested == nil {
-				entry.Nested = nested
-			} else {
-				for k, subVal := range nested {
-					if existingSub, ok := entry.Nested[k]; ok {
-						existingSub.Count += subVal.Count
-						existingSub.Values = append(existingSub.Values, subVal.Values...)
-					} else {
-						entry.Nested[k] = subVal
-					}
+				entry.Nested = make(map[protowire.Number]*wireFieldSummary, len(nested))
+			}
+			for k, subVal := range nested {
+				if existingSub, ok := entry.Nested[k]; ok {
+					existingSub.Count += subVal.Count
+					existingSub.Values = append(existingSub.Values, subVal.Values...)
+				} else {
+					cloned := *subVal
+					cloned.Values = append([]string(nil), subVal.Values...)
+					entry.Nested[k] = &cloned
 				}
 			}
 		}
@@ -815,6 +1188,7 @@ func parseProtoWireMessage(b []byte, depth int) (map[protowire.Number]*wireField
 	return fields, nil
 }
 
+// isLikelyNestedProtoMessage heuristically determines whether a length-delimited byte slice is an embedded Protobuf message.
 func isLikelyNestedProtoMessage(b []byte) bool {
 	if len(b) < 2 {
 		return false
@@ -839,6 +1213,7 @@ func isLikelyNestedProtoMessage(b []byte) bool {
 	return fieldCount > 0
 }
 
+// isPrintableUTF8 reports whether s contains only printable characters and common whitespace.
 func isPrintableUTF8(s string) bool {
 	if s == "" {
 		return true
@@ -854,6 +1229,7 @@ func isPrintableUTF8(s string) bool {
 	return true
 }
 
+// diffProtoWireMessages compares two wire-level Protobuf field maps and appends any structural or value diffs.
 func diffProtoWireMessages(pathPrefix string, baseFields, prevFields map[protowire.Number]*wireFieldSummary, opts DiffOptions, diffs *[]ContractDiff) {
 	numsMap := make(map[protowire.Number]struct{}, len(baseFields)+len(prevFields))
 	for num := range baseFields {
@@ -910,8 +1286,32 @@ func diffProtoWireMessages(pathPrefix string, baseFields, prevFields map[protowi
 			continue
 		}
 
-		if bField.Nested != nil && pField.Nested != nil {
-			diffProtoWireMessages(fieldPath, bField.Nested, pField.Nested, opts, diffs)
+		if len(bField.NestedMessages) > 0 && len(pField.NestedMessages) > 0 {
+			if opts.CompareValues && bField.Count != pField.Count {
+				*diffs = append(*diffs, ContractDiff{
+					Path:     fieldPath,
+					Kind:     "count_mismatch",
+					Baseline: fmt.Sprintf("count=%d", bField.Count),
+					Preview:  fmt.Sprintf("count=%d", pField.Count),
+					Breaking: true,
+				})
+			}
+			if len(bField.NestedMessages) == 1 && len(pField.NestedMessages) == 1 {
+				diffProtoWireMessages(fieldPath, bField.NestedMessages[0], pField.NestedMessages[0], opts, diffs)
+			} else {
+				limit := len(bField.NestedMessages)
+				if len(pField.NestedMessages) < limit {
+					limit = len(pField.NestedMessages)
+				}
+				for idx := 0; idx < limit; idx++ {
+					diffProtoWireMessages(fmt.Sprintf("%s[%d]", fieldPath, idx), bField.NestedMessages[idx], pField.NestedMessages[idx], opts, diffs)
+				}
+				if !opts.CompareValues && len(pField.NestedMessages) > len(bField.NestedMessages) {
+					for idx := len(bField.NestedMessages); idx < len(pField.NestedMessages); idx++ {
+						diffProtoWireMessages(fmt.Sprintf("%s[%d]", fieldPath, idx), bField.NestedMessages[0], pField.NestedMessages[idx], opts, diffs)
+					}
+				}
+			}
 			continue
 		}
 
@@ -941,6 +1341,7 @@ func diffProtoWireMessages(pathPrefix string, baseFields, prevFields map[protowi
 	}
 }
 
+// normalizeWireCategory normalizes bytes/message to bytes so length-delimited fields are compared in the same wire category.
 func normalizeWireCategory(w string) string {
 	if w == "bytes/message" {
 		return "bytes"
@@ -948,6 +1349,7 @@ func normalizeWireCategory(w string) string {
 	return w
 }
 
+// shouldIgnoreField reports whether path matches any field name or suffix in ignoreList.
 func shouldIgnoreField(path string, ignoreList []string) bool {
 	if len(ignoreList) == 0 {
 		return false
@@ -964,6 +1366,7 @@ func shouldIgnoreField(path string, ignoreList []string) bool {
 	return false
 }
 
+// truncateSample truncates s to maxLen characters, appending an ellipsis if truncated.
 func truncateSample(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s

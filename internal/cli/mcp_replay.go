@@ -115,28 +115,60 @@ func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.
 			headerValue = envName
 		}
 
-		if envName != "" && client != nil && baseURL == "" {
+		allAbsolute := allEntriesAbsolute(entries)
+		canSkipDiscovery := (previewURL != "" || strings.TrimSpace(params.RoutingKey) != "") && (baseURL != "" || allAbsolute)
+
+		if envName != "" && client != nil {
 			resp, getErr := client.GetEnvironment(ctx, connect.NewRequest(&divergev1alpha1.GetEnvironmentRequest{
 				Name:      envName,
 				Namespace: ns,
 			}))
 			if getErr != nil {
-				return errorToolResult(getErr), nil
-			}
-			if env := resp.Msg.GetEnvironment(); env != nil {
-				baseURL = strings.TrimSpace(env.GetStatus().GetUrl())
-				if baseURL == "" {
-					baseURL = strings.TrimSpace(env.GetSpec().GetRouting().GetExternalUrl())
+				if !canSkipDiscovery {
+					return errorToolResult(getErr), nil
 				}
-				if hk := strings.TrimSpace(env.GetSpec().GetRouting().GetHeaderKey()); hk != "" {
+			} else if env := resp.Msg.GetEnvironment(); env != nil {
+				routing := env.GetSpec().GetRouting()
+				if hk := strings.TrimSpace(routing.GetHeaderKey()); hk != "" {
 					headerKey = hk
 				}
-				if params.RoutingKey == "" {
-					if hv := strings.TrimSpace(env.GetSpec().GetRouting().GetHeaderValue()); hv != "" {
+				if strings.TrimSpace(params.RoutingKey) == "" {
+					if hv := strings.TrimSpace(routing.GetHeaderValue()); hv != "" {
 						headerValue = hv
 					}
 				}
+
+				statusURL := strings.TrimSpace(env.GetStatus().GetUrl())
+				externalURL := strings.TrimSpace(routing.GetExternalUrl())
+				subdomainRouted := strings.EqualFold(strings.TrimSpace(routing.GetMode()), "subdomain")
+
+				if subdomainRouted {
+					if previewURL == "" {
+						previewURL = statusURL
+					}
+					if previewURL == "" {
+						return errorToolResult(fmt.Errorf("environment %s uses subdomain routing but has no published preview URL; provide preview_url", envName)), nil
+					}
+					if baseURL == "" {
+						baseURL = externalURL
+					}
+					if baseURL == "" && !allAbsolute {
+						return errorToolResult(fmt.Errorf("environment %s uses subdomain routing (%s); base_url is required to compare against baseline", envName, previewURL)), nil
+					}
+				} else if baseURL == "" {
+					baseURL = statusURL
+					if baseURL == "" {
+						baseURL = externalURL
+					}
+				}
 			}
+		}
+
+		if previewURL == "" && headerValue == "" {
+			return errorToolResult(fmt.Errorf("one of name, routing_key, or preview_url is required to target a preview environment")), nil
+		}
+		if previewURL != "" && previewURL == baseURL && headerValue == "" {
+			return errorToolResult(fmt.Errorf("preview_url must differ from base_url when name and routing_key are omitted")), nil
 		}
 
 		var maxLatency time.Duration

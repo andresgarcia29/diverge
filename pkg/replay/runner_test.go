@@ -210,3 +210,85 @@ func TestResolveEntryURL_RewriteAndSSRF(t *testing.T) {
 	_, err = ResolveEntryURL("http://169.254.169.254", "/latest/meta-data")
 	assert.Error(t, err)
 }
+
+func TestFormatReportOutputs(t *testing.T) {
+	report := &Report{
+		Environment:      "pr-42",
+		TargetURL:        "https://staging.example.com",
+		RoutingHeader:    "x-diverge-env: pr-42",
+		Passed:           false,
+		TotalRequests:    2,
+		PassedRequests:   1,
+		FailedRequests:   1,
+		StatusMismatches: 0,
+		BreakingDiffs:    1,
+		BaselineP50Ms:    12,
+		PreviewP50Ms:     15,
+		BaselineP95Ms:    25,
+		PreviewP95Ms:     30,
+		Results: []EntryResult{
+			{
+				ID:                "req-1",
+				Method:            "GET",
+				Path:              "/api/v1/items",
+				Protocol:          ProtocolJSON,
+				BaselineStatus:    200,
+				PreviewStatus:     200,
+				BaselineLatencyMs: 12,
+				PreviewLatencyMs:  15,
+				Passed:            true,
+				StatusMatch:       true,
+				ContractDiffs: []ContractDiff{
+					{
+						Path:     "$.extra",
+						Kind:     "extra_field",
+						Preview:  "string",
+						Breaking: false,
+					},
+				},
+			},
+			{
+				ID:                "req-2",
+				Method:            "POST",
+				Path:              "/acme.v1.Order|Create",
+				Protocol:          ProtocolProtobuf,
+				BaselineStatus:    200,
+				PreviewStatus:     200,
+				BaselineLatencyMs: 25,
+				PreviewLatencyMs:  30,
+				Passed:            false,
+				StatusMatch:       true,
+				BreakingDiffCount: 1,
+				FailureReasons:    []string{"1 breaking contract diff(s) (e.g. proto.field_2: missing_field)"},
+				ContractDiffs: []ContractDiff{
+					{
+						Path:     "proto.field_2",
+						Kind:     "missing_field",
+						Baseline: "bytes|string",
+						Breaking: true,
+					},
+				},
+			},
+		},
+	}
+
+	var tableBuf bytes.Buffer
+	FormatTable(&tableBuf, report)
+	tableStr := tableBuf.String()
+	assert.Contains(t, tableStr, "[PASS]")
+	assert.Contains(t, tableStr, "[FAIL]")
+	assert.Contains(t, tableStr, "1 non-breaking diff(s)")
+	assert.Contains(t, tableStr, "Replay FAILED")
+
+	var mdBuf bytes.Buffer
+	require.NoError(t, FormatMarkdown(&mdBuf, report))
+	mdStr := mdBuf.String()
+	assert.Contains(t, mdStr, "### ❌ Diverge Traffic Replay Failed: pr-42")
+	assert.Contains(t, mdStr, "#### 🔍 Contract & Wire Diffs")
+	assert.Contains(t, mdStr, "proto.field_2")
+	assert.Contains(t, mdStr, `bytes\|string`)
+
+	var jsonBuf bytes.Buffer
+	require.NoError(t, FormatJSON(&jsonBuf, report))
+	assert.Contains(t, jsonBuf.String(), `"environment": "pr-42"`)
+}

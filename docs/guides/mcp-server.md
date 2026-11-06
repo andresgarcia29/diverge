@@ -127,7 +127,7 @@ The MCP server provides the following tools grouped by service:
 | `diverge_doctor` | Run cluster and environment health checks (GatewayClass, CRDs, RBAC, database connectivity). |
 | `diverge_verify` | Run the unified verification suite (Doctor Kubernetes workload diagnostics, routed HTTP readiness status check, optional latency threshold check, and optional baseline status parity). |
 | `diverge_loadtest` | Run a bounded HTTP/gRPC load test against a preview environment and return latency/error percentiles. |
-| `diverge_replay` | Replay a recorded HTTP, ConnectRPC, or Protobuf/gRPC traffic trace (`.jsonl`, `.har`, `.json`, or inline `requests`) against baseline and a preview environment, returning status parity, p50/p95 latency, JSON schema diffs, and Protobuf wire/descriptor contract diffs. |
+| `diverge_replay` | Replay a recorded HTTP, ConnectRPC, or Protobuf/gRPC traffic trace (`.jsonl`, `.har`, `.json`, or inline `requests`) against baseline and a preview environment, returning status parity, p50/p95 latency, JSON schema diffs, and Protobuf wire/descriptor contract diffs. Executes requests against the baseline and, when the baseline request succeeds, against the preview—choose safe targets and filter state-changing requests from traces before replay. |
 | `diverge_visual_test` | Compare baseline and preview PNG screenshots (`baseline_path`/`preview_path` or batch `baseline_dir`/`preview_dir`) and return pixel-diff pass/fail metrics (writing diff PNGs when `diff_output_path` is set and diff data exists). |
 
 ### Autonomous AgentTask Tools

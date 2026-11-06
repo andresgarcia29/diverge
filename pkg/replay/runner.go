@@ -673,10 +673,12 @@ func FormatMarkdown(w io.Writer, report *Report) error {
 				if d.Breaking {
 					brk = "**Yes**"
 				}
+				rPathEsc := strings.ReplaceAll(r.Path, "|", "\\|")
+				dPathEsc := strings.ReplaceAll(d.Path, "|", "\\|")
 				bEsc := strings.ReplaceAll(d.Baseline, "|", "\\|")
 				pEsc := strings.ReplaceAll(d.Preview, "|", "\\|")
 				_, _ = fmt.Fprintf(&buf, "| %s (`%s`) | `%s` | `%s` | `%s` | `%s` | %s |\n",
-					r.ID, r.Path, d.Path, d.Kind, bEsc, pEsc, brk)
+					r.ID, rPathEsc, dPathEsc, d.Kind, bEsc, pEsc, brk)
 			}
 		}
 	}

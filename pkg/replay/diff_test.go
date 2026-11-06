@@ -328,3 +328,75 @@ func TestComparePayloads_UTF8ProtoFallbackAndRepeatedNestedWire(t *testing.T) {
 	assert.Equal(t, "proto.field_3[0].field_2", repDiffs[0].Path)
 	assert.Equal(t, "missing_field", repDiffs[0].Kind)
 }
+
+func TestLoadDescriptorFiles(t *testing.T) {
+	// Empty path returns nil, nil
+	files, err := LoadDescriptorFiles("   ")
+	require.NoError(t, err)
+	assert.Nil(t, files)
+
+	// Missing file returns error
+	_, err = LoadDescriptorFiles("/nonexistent/descriptors.binpb")
+	require.Error(t, err)
+
+	// Valid serialized FileDescriptorSet loads and resolves message descriptors
+	fds := &descriptorpb.FileDescriptorSet{}
+	visited := make(map[string]bool)
+	var walkFile func(f protoreflect.FileDescriptor)
+	walkFile = func(f protoreflect.FileDescriptor) {
+		if visited[f.Path()] {
+			return
+		}
+		visited[f.Path()] = true
+		imports := f.Imports()
+		for i := 0; i < imports.Len(); i++ {
+			walkFile(imports.Get(i).FileDescriptor)
+		}
+		fds.File = append(fds.File, protodesc.ToFileDescriptorProto(f))
+	}
+	walkFile((&divergev1alpha1.Environment{}).ProtoReflect().Descriptor().ParentFile())
+
+	// Also include a synthetic message descriptor not linked into the binary
+	synthName := "synthetic.proto"
+	synthPkg := "acme.synthetic.v1"
+	synthSyntax := "proto3"
+	synthMsgName := "SyntheticInvoiceResponse"
+	synthFieldName := "invoice_id"
+	synthFieldNum := int32(1)
+	synthFieldLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	synthFieldType := descriptorpb.FieldDescriptorProto_TYPE_STRING
+	fds.File = append(fds.File, &descriptorpb.FileDescriptorProto{
+		Name:    &synthName,
+		Package: &synthPkg,
+		Syntax:  &synthSyntax,
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: &synthMsgName,
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:   &synthFieldName,
+						Number: &synthFieldNum,
+						Label:  &synthFieldLabel,
+						Type:   &synthFieldType,
+					},
+				},
+			},
+		},
+	})
+
+	rawFDS, err := proto.Marshal(fds)
+	require.NoError(t, err)
+
+	tmpFile := filepath.Join(t.TempDir(), "env.binpb")
+	require.NoError(t, os.WriteFile(tmpFile, rawFDS, 0o644))
+
+	loaded, err := LoadDescriptorFiles(tmpFile)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	synthDesc, err := loaded.FindDescriptorByName("acme.synthetic.v1.SyntheticInvoiceResponse")
+	require.NoError(t, err)
+	assert.NotNil(t, synthDesc)
+	desc, err := loaded.FindDescriptorByName("diverge.v1alpha1.Environment")
+	require.NoError(t, err)
+	assert.NotNil(t, desc)
+}

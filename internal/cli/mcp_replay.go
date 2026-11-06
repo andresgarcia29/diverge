@@ -71,7 +71,7 @@ type mcpReplayParams struct {
 func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.EnvironmentServiceClient) {
 	registry.Register(mcpruntime.ToolDefinition{
 		Name:        "diverge_replay",
-		Description: "Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic (.jsonl, .har, .json, or inline requests) against baseline and a preview environment. Compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags/descriptors.",
+		Description: "Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic (.jsonl, .har, .json, or inline requests) against baseline and a preview environment. Compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags/descriptors. Executes requests against baseline and attempts preview only when baseline execution completes without error (including passing the 10 MiB response-size check, whereas baseline HTTP or gRPC status does not determine whether preview is attempted). Replay forwards recorded headers and bodies without sanitizing credentials or sensitive data and does not strip recorded diverge_env sticky-routing cookies—choose safe targets, filter state-changing requests, remove or replace captured credentials and sensitive data, remove diverge_env cookies from traces and inline requests, and verify that the baseline URL serves the baseline before replay.",
 		InputSchema: replaySchema,
 	}, func(ctx context.Context, req mcpruntime.ToolRequest) (*mcpruntime.CallToolResult, error) {
 		var params mcpReplayParams

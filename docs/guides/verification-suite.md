@@ -107,15 +107,17 @@ diverge doctor pr-42 --json
 
 ## 4. Deterministic Traffic Replay & Contract Diffing (`diverge replay`)
 
-Replay recorded multi-endpoint HTTP, ConnectRPC, and Protobuf/gRPC request traces (`.jsonl`, `.har`, or `.json`) against both baseline (unrouted) and a candidate preview environment (with `x-diverge-env` and W3C `baggage` injected). `diverge replay` compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags (or typed `.binpb` descriptors).
+Replay recorded multi-endpoint HTTP, ConnectRPC, and Protobuf/gRPC request traces (`.jsonl`, `.har`, or `.json`) against both baseline (unrouted) and a candidate preview environment (with `x-diverge-env` and W3C `baggage` injected). `diverge replay` compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags (or typed `.binpb` descriptors). Because `diverge replay` executes each recorded request against the baseline and attempts the preview request only when baseline execution completes without error (including passing the 10 MiB response-size check, whereas baseline HTTP or gRPC status does not determine whether preview is attempted), always target safe environments and filter state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`, or mutating RPCs) from traces before replaying. In addition, replay forwards recorded headers and bodies without sanitizing credentials or sensitive data, and recorded `diverge_env` sticky-routing cookies are not stripped by the replay runner and can route requests from any supported trace format (`.jsonl`, `.har`, or `.json`) to a preview even when `--base-url` is omitted—always remove or replace captured credentials and sensitive data, remove `diverge_env` routing cookies from all traces, and verify that the baseline URL serves the baseline before replaying.
 
 ### Quick Start
 ```bash
 # Replay a JSONL request trace against preview environment pr-42
 diverge replay pr-42 --from ./traces/checkout.jsonl
 
-# Replay a Chrome DevTools / Playwright HAR archive and emit a GitHub Step Summary
-# (writes Markdown to $GITHUB_STEP_SUMMARY, or stdout, or stderr when --json is set)
+# Replay a filtered single-service HAR archive and emit a GitHub Step Summary
+# (writes Markdown to $GITHUB_STEP_SUMMARY, or stdout, or stderr when --json is set;
+# remove any recorded diverge_env routing cookies, strip or replace captured credentials/sensitive data,
+# and filter out third-party hosts before using --base-url)
 diverge replay pr-42 --from ./recording.har --base-url https://staging.example.com --github-summary
 
 # Replay binary Protobuf/gRPC traffic with schema-aware descriptor decoding

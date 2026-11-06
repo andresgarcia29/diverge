@@ -1,5 +1,20 @@
 # Changelog
 
+## [v0.20.0] - 2026-11-05
+
+### 🚀 Highlights & New Features
+
+#### 🔁 Deterministic Traffic Replay & Protobuf/ConnectRPC/JSON Contract Diffing (`diverge replay` & `diverge_replay`)
+- **Multi-Protocol Replay Engine (`pkg/replay/`, `internal/cli/replay.go`, `internal/cli/mcp_replay.go`) (#327)**: Added `diverge replay <env-name> --from <trace.jsonl|trace.har|trace.json>` and the `diverge_replay` MCP tool to replay recorded HTTP, ConnectRPC (`application/connect+proto`, `application/connect+json`), gRPC (`application/grpc`, `application/grpc+proto`), and gRPC-Web (`application/grpc-web+proto`, `application/grpc-web+json`) request traces against baseline and preview environments.
+- **Schema-Less Wire & Descriptor-Backed Protobuf Diffing (`pkg/replay/diff.go`) (#327)**: Compares binary Protobuf responses directly at the wire level (`protowire` varint, fixed32/64, length-delimited nested messages, and repeated message element boundaries) without requiring `.proto` files, or resolves human-readable field paths (`dynamicpb`) and map keys when `--proto-descriptor <file.binpb>` and `--proto-message` are provided. Unwraps 5-byte gRPC / Connect streaming / gRPC-Web envelopes and compares HTTP/2 `Grpc-Status` trailers and Connect end-of-stream error frames.
+- **JSON Structural Contract Diffing & SSRF-Hardened Transport (`pkg/replay/diff.go`, `pkg/replay/runner.go`) (#327)**: Detects missing fields, type mismatches, array element schema regressions, and trailing JSON stream tokens, while enforcing dial-time SSRF validation (`secureHTTPClient`), redirect target validation, and baseline routing header / W3C `baggage` (`diverge.env`) sanitization.
+
+#### 🤖 Automated Draft PR / MR Creation & `status.prURL` Reporting for `AgentTask` Sandboxes
+- **Automated GitHub PR & GitLab MR Creation (`internal/agentrunner/`, `internal/sandbox/`) (#326)**: `diverge-agent-runner` now automatically opens a Draft (or Ready-for-Review) GitHub Pull Request or GitLab Merge Request after committing and pushing an `AgentTask`'s working branch when an SCM token (`divergedev.com/scm-secret` or `DIVERGE_SCM_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` / `GITLAB_TOKEN`) is mounted.
+- **`AgentTaskStatus.PRURL` Reporting & Dashboard Deep-Links (`api/v1alpha1/agenttask_types.go`, `internal/server/llm_meter.go`, `web/src/pages/AgentTaskDetail.tsx`) (#326)**: Reports `prUrl` via `POST /api/v1/agenttask/meter`, persists `status.prURL` on the `AgentTask` CR, and surfaces an **Open PR** button and status badge in the Web Dashboard and `diverge task status`.
+
+---
+
 ## [v0.19.0] - 2026-11-04
 
 ### 🚀 Highlights & New Features

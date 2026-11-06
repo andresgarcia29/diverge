@@ -327,6 +327,21 @@ func TestResolveReplayRouting(t *testing.T) {
 		},
 	}
 
+	subdomainPGWithExternalURL := &divergeiov1alpha1.PreviewGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-sub-ext", Namespace: "default"},
+		Spec: divergeiov1alpha1.PreviewGroupSpec{
+			Routing: divergeiov1alpha1.PreviewGroupRouting{
+				Mode:        "subdomain",
+				ExternalURL: "https://pg-sub-ext.preview.example.com",
+			},
+		},
+		Status: divergeiov1alpha1.PreviewGroupStatus{
+			Services: []divergeiov1alpha1.PreviewGroupServiceStatus{
+				{Name: "api", URL: "https://pg-sub-ext.preview.example.com"},
+			},
+		},
+	}
+
 	tests := []struct {
 		name           string
 		objects        []client.Object
@@ -396,6 +411,25 @@ func TestResolveReplayRouting(t *testing.T) {
 			entries:       relEntries,
 			opts:          replayOptions{baseURL: "https://pr-42-web-admin.example.com"},
 			wantErrSubstr: "has multiple service URLs; pass --preview-url",
+		},
+		{
+			name:          "subdomain-routed PreviewGroup with ExternalURL and relative trace requires base-url",
+			objects:       []client.Object{subdomainPGWithExternalURL},
+			envName:       "pg-sub-ext",
+			entries:       relEntries,
+			opts:          replayOptions{},
+			wantErrSubstr: "pass --base-url <baseline-url>",
+		},
+		{
+			name:           "subdomain-routed PreviewGroup with ExternalURL and absolute trace keeps baseline from trace",
+			objects:        []client.Object{subdomainPGWithExternalURL},
+			envName:        "pg-sub-ext",
+			entries:        absEntries,
+			opts:           replayOptions{},
+			wantBaseURL:    "",
+			wantPreviewURL: "https://pg-sub-ext.preview.example.com",
+			wantHeaderKey:  replay.DefaultHeaderKey,
+			wantHeaderVal:  "pg-sub-ext",
 		},
 		{
 			name:           "canSkipCluster allows replay without cluster when base-url and header-value are set",

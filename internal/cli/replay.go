@@ -247,7 +247,7 @@ func resolveReplayRouting(cmd *cobra.Command, app *App, envName string, entries 
 						headerValue = pg.Spec.Routing.HeaderValue
 					}
 					extURL := strings.TrimSpace(pg.Spec.Routing.ExternalURL)
-					if !strings.Contains(extURL, "{env}") {
+					if !subdomainRouted && !strings.Contains(extURL, "{env}") {
 						clusterBaselineURL = extURL
 					}
 					clusterPreviewURL, ambiguousPreviewService = selectPreviewGroupServiceURL(pg.Status.Services, baseURL, extURL, entries)
@@ -340,11 +340,11 @@ func selectPreviewGroupServiceURL(services []divergeiov1alpha1.PreviewGroupServi
 	}
 
 	refURL := strings.TrimSpace(explicitBaseURL)
-	if refURL == "" && !strings.Contains(externalURL, "{") {
-		refURL = strings.TrimSpace(externalURL)
-	}
 	if refURL == "" && len(entries) > 0 && isAbsoluteHTTPURL(entries[0].Path) {
 		refURL = strings.TrimSpace(entries[0].Path)
+	}
+	if refURL == "" && !strings.Contains(externalURL, "{") {
+		refURL = strings.TrimSpace(externalURL)
 	}
 	if refURL == "" {
 		return "", true

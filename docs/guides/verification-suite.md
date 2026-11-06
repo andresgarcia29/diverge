@@ -105,7 +105,25 @@ diverge doctor pr-42 --json
 
 ---
 
-## 4. VS Code, Cursor & OpenCode Extension
+## 4. Deterministic Traffic Replay & Contract Diffing (`diverge replay`)
+
+Replay recorded multi-endpoint HTTP, ConnectRPC, and Protobuf/gRPC request traces (`.jsonl`, `.har`, or `.json`) against both baseline (unrouted) and a candidate preview environment (with `x-diverge-env` and W3C `baggage` injected). `diverge replay` compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags (or typed `.binpb` descriptors).
+
+### Quick Start
+```bash
+# Replay a JSONL request trace against preview environment pr-42
+diverge replay pr-42 --from ./traces/checkout.jsonl
+
+# Replay a Chrome DevTools / Playwright HAR archive and emit a GitHub Step Summary
+diverge replay pr-42 --from ./recording.har --base-url https://staging.example.com --github-summary
+
+# Replay binary Protobuf/gRPC traffic with schema-aware descriptor decoding
+diverge replay pr-42 --from ./grpc-trace.jsonl --proto-descriptor ./descriptors.binpb --proto-message acme.v1.ChargeResponse
+```
+
+---
+
+## 5. VS Code, Cursor & OpenCode Extension
 
 The Diverge IDE extension integrates preview management directly into your editor activity bar.
 
@@ -131,6 +149,7 @@ OpenCode AI agents can invoke Diverge tools directly via the native MCP server c
 }
 ```
 Available Agent Tools:
+- `diverge_replay`
 - `diverge_loadtest`
 - `diverge_doctor`
 - `diverge_create_environment`

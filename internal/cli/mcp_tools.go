@@ -651,6 +651,11 @@ func customTools() []mcpruntime.ToolDefinition {
 			Description: "Run pixel-by-pixel visual regression comparison between baseline and preview screenshots (single file pair or directory batch). Highlights visual drift and optionally writes diff PNG artifacts.",
 			InputSchema: visualTestSchema,
 		},
+		{
+			Name:        "diverge_replay",
+			Description: "Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic (.jsonl, .har, .json, or inline requests) against baseline and a preview environment. Compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags/descriptors.",
+			InputSchema: replaySchema,
+		},
 	}
 }
 
@@ -661,4 +666,5 @@ func registerCustomTools(registry mcpruntime.Registry, envClient divergev1alpha1
 	registerDoctor(registry, envClient, diagnoser...)
 	registerVerify(registry, envClient, diagnoser...)
 	registerVisualTest(registry)
+	registerReplay(registry, envClient)
 }

@@ -74,6 +74,7 @@ func main() {
 	var deployProvider string
 	var databaseProvider string
 	var webhookSecretToken string
+	var gitlabAllowedUsersRaw string
 	var notifierProvider string
 	var defaultNamespace string
 	var asyncProvider string
@@ -98,6 +99,7 @@ func main() {
 	flag.StringVar(&sandboxProvider, "sandbox-provider", "agent-sandbox", "Default sandbox provider (agent-sandbox, noop)")
 	flag.BoolVar(&enableGAMMA, "enable-gamma", false, "Enable GAMMA mesh routing for PreviewGroups (requires Istio Ambient or GAMMA-compatible mesh)")
 	flag.StringVar(&webhookSecretToken, "webhook-secret-token", "", "The secret token for authenticating webhooks (prefer DIVERGE_WEBHOOK_SECRET env var).")
+	flag.StringVar(&gitlabAllowedUsersRaw, "gitlab-allowed-users", "", "Comma-separated list of GitLab usernames authorized to execute /diverge MR slash commands (or set DIVERGE_GITLAB_ALLOWED_USERS).")
 	flag.StringVar(&defaultNamespace, "default-namespace", "default", "Default namespace to create environments in")
 
 	var kedaMinReplicas int64
@@ -141,6 +143,15 @@ func main() {
 	notifierToken := os.Getenv("DIVERGE_NOTIFIER_TOKEN")
 	if envSecret := os.Getenv("DIVERGE_WEBHOOK_SECRET"); envSecret != "" {
 		webhookSecretToken = envSecret
+	}
+	if envAllowed := os.Getenv("DIVERGE_GITLAB_ALLOWED_USERS"); envAllowed != "" {
+		gitlabAllowedUsersRaw = envAllowed
+	}
+	var gitlabAllowedUsers []string
+	for _, u := range strings.Split(gitlabAllowedUsersRaw, ",") {
+		if trimmed := strings.TrimSpace(u); trimmed != "" {
+			gitlabAllowedUsers = append(gitlabAllowedUsers, trimmed)
+		}
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -378,6 +389,7 @@ func main() {
 		Config:        webhookConfig,
 		ConfigFetcher: glConfigFetcher,
 		Commenter:     glCommenter,
+		AllowedUsers:  gitlabAllowedUsers,
 		DefaultNS:     defaultNamespace,
 	})
 

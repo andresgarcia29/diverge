@@ -87,7 +87,7 @@ func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePa
 		return false
 	}
 	username := strings.TrimSpace(payload.User.Username)
-	if username == "" && payload.User.ID <= 0 {
+	if username == "" {
 		return false
 	}
 	if assoc := strings.ToUpper(strings.TrimSpace(payload.ObjectAttributes.AuthorAssociation)); assoc != "" {
@@ -97,15 +97,16 @@ func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePa
 			return false
 		}
 	}
-	if len(h.AllowedUsers) > 0 {
-		for _, allowed := range h.AllowedUsers {
-			if strings.EqualFold(strings.TrimSpace(allowed), username) {
-				return true
-			}
-		}
+	if len(h.AllowedUsers) == 0 {
 		return false
 	}
-	return true
+	for _, allowed := range h.AllowedUsers {
+		trimmed := strings.TrimSpace(allowed)
+		if trimmed != "" && strings.EqualFold(trimmed, username) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *GitLabWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

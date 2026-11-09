@@ -44,7 +44,14 @@ jobs:
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
           go_path="$(go env GOPATH)"
-          KUBEBUILDER_ASSETS="$("$go_path/bin/setup-envtest" use 1.32.x --bin-dir /tmp/envtest -p path)"
+          for attempt in 1 2 3 4 5; do
+            if KUBEBUILDER_ASSETS="$("$go_path/bin/setup-envtest" use 1.32.x --bin-dir /tmp/envtest -p path)"; then
+              break
+            fi
+            echo "setup-envtest download attempt ${attempt} failed; retrying..." >&2
+            sleep $((attempt * 3))
+          done
+          test -n "${KUBEBUILDER_ASSETS:-}"
           export KUBEBUILDER_ASSETS
           go test ./internal/controller/... ./internal/server/... -tags=integration -v -count=1
 

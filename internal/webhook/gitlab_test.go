@@ -362,9 +362,10 @@ func TestGitLabWebhookNoteSlashCommand(t *testing.T) {
 	fakeK8s := newTestClient()
 
 	handler := &GitLabWebhookHandler{
-		Client:    fakeK8s,
-		Config:    WebhookConfig{SecretToken: "secret"},
-		DefaultNS: "preview",
+		Client:       fakeK8s,
+		Config:       WebhookConfig{SecretToken: "secret"},
+		AllowedUsers: []string{"maintainer"},
+		DefaultNS:    "preview",
 	}
 
 	body := `{
@@ -528,6 +529,33 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("empty AllowedUsers fails closed", func(t *testing.T) {
+		unconfiguredHandler := &GitLabWebhookHandler{
+			Client:    fakeK8s,
+			Config:    WebhookConfig{SecretToken: "secret"},
+			DefaultNS: "preview",
+		}
+		body := `{
+			"object_kind": "note",
+			"user": {"id": 1, "username": "trusted-dev"},
+			"object_attributes": {
+				"note": "/diverge replay /healthz",
+				"noteable_type": "MergeRequest"
+			},
+			"merge_request": {"iid": 88, "source_branch": "feat/db-pool"},
+			"project": {"path_with_namespace": "team/payments-api"}
+		}`
+		req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+		req.Header.Set("X-Gitlab-Token", "secret")
+		req.Header.Set("X-Gitlab-Event", "Note Hook")
+
+		rr := httptest.NewRecorder()
+		unconfiguredHandler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected 200, got %d", rr.Code)
+		}
+	})
 }
 
 func TestGitLabWebhookNoteWithCommenterFeedback(t *testing.T) {

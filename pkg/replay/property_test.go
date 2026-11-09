@@ -172,6 +172,40 @@ func TestProperty_StripDivergeBaggagePreservesNonDivergeEntries(t *testing.T) {
 	})
 }
 
+// TestProperty_StripDivergeCookiePreservesNonDivergeCookies verifies that stripDivergeCookie removes
+// all diverge_env=<val> cookies while preserving all other cookies in order.
+func TestProperty_StripDivergeCookiePreservesNonDivergeCookies(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		numKeep := rapid.IntRange(0, 5).Draw(t, "numKeep")
+		var allCookies []string
+		var expectedKeep []string
+
+		for i := 0; i < numKeep; i++ {
+			k := fmt.Sprintf("session_%d", i)
+			v := rapid.StringMatching(`[a-z0-9]{1,8}`).Draw(t, "cookieVal")
+			entry := k + "=" + v
+			expectedKeep = append(expectedKeep, entry)
+			allCookies = append(allCookies, entry)
+			if rapid.Bool().Draw(t, "insertDivergeCookieAfter") {
+				allCookies = append(allCookies, "diverge_env="+rapid.StringMatching(`pr-[0-9]{1,4}`).Draw(t, "envCookieVal"))
+			}
+		}
+		if len(allCookies) == 0 {
+			allCookies = append(allCookies, "diverge_env=pr-42")
+		}
+
+		hdr := make(http.Header)
+		hdr.Set("Cookie", strings.Join(allCookies, "; "))
+		stripDivergeCookie(&hdr)
+
+		if len(expectedKeep) == 0 {
+			assert.Empty(t, hdr.Get("Cookie"))
+		} else {
+			assert.Equal(t, strings.Join(expectedKeep, "; "), hdr.Get("Cookie"))
+		}
+	})
+}
+
 // TestProperty_PercentileInt64Monotonic verifies that percentileInt64 maintains monotonic ordering
 // (0 <= p50 <= p95) for any non-empty slice of non-negative latency samples.
 func TestProperty_PercentileInt64Monotonic(t *testing.T) {

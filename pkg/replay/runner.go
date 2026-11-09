@@ -40,6 +40,9 @@ type Config struct {
 	MaxLatency         time.Duration
 	FailOnStatusDiff   bool
 	FailOnContractDiff bool
+	FilterHosts        []string
+	StripHeaders       []string
+	StripAuth          bool
 	DiffOptions        DiffOptions
 	HTTPClient         *http.Client
 }
@@ -103,6 +106,9 @@ func NewRunner(cfg Config) *Runner {
 
 // Run replays the provided trace entries against baseline and preview endpoints.
 func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, error) {
+	if len(r.Config.FilterHosts) > 0 {
+		entries = FilterEntriesByHost(entries, r.Config.FilterHosts)
+	}
 	if len(entries) == 0 {
 		return nil, errors.New("cannot run replay with 0 trace entries")
 	}
@@ -321,7 +327,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		return res
 	}
 
-	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "")
+	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders)
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -330,7 +336,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue)
+	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -461,8 +467,61 @@ func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	return finalURL, nil
 }
 
+// FilterEntriesByHost retains relative-path entries and absolute-URL entries whose hostname matches one of allowedHosts
+// (supporting exact hostname matches like "api.example.com" and wildcard subdomain patterns like "*.example.com").
+func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []RequestEntry {
+	var normalized []string
+	for _, h := range allowedHosts {
+		for _, part := range strings.Split(h, ",") {
+			cleaned := strings.ToLower(strings.TrimSpace(part))
+			if cleaned != "" {
+				normalized = append(normalized, cleaned)
+			}
+		}
+	}
+	if len(normalized) == 0 {
+		return entries
+	}
+
+	filtered := make([]RequestEntry, 0, len(entries))
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry.Path)
+		if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
+			filtered = append(filtered, entry)
+			continue
+		}
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			continue
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if hostMatchesFilter(host, normalized) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func hostMatchesFilter(host string, patterns []string) bool {
+	if host == "" {
+		return false
+	}
+	for _, pat := range patterns {
+		if host == pat {
+			return true
+		}
+		if strings.HasPrefix(pat, "*.") {
+			suffix := pat[1:] // ".example.com"
+			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string) (int, string, string, []byte, time.Duration, error) {
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string) (int, string, string, []byte, time.Duration, error) {
 	reqCtx := ctx
 	var cancel context.CancelFunc
 	if timeout > 0 {
@@ -484,12 +543,26 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 		req.Header.Set(k, v)
 	}
 
-	// Always strip any recorded routing headers or diverge.env baggage items first so baseline requests never route to preview
+	if stripAuth {
+		req.Header.Del("Authorization")
+		req.Header.Del("Proxy-Authorization")
+		req.Header.Del("Cookie")
+		req.Header.Del("X-Api-Key")
+	}
+	for _, h := range stripHeaders {
+		if trimmed := strings.TrimSpace(h); trimmed != "" {
+			req.Header.Del(trimmed)
+		}
+	}
+
+	// Always strip any recorded routing headers, diverge_env sticky-routing cookies, or diverge.env baggage items first
+	// so baseline requests never route to preview and preview requests route strictly to routingVal.
 	req.Header.Del(DefaultHeaderKey)
 	if routingKey != "" {
 		req.Header.Del(routingKey)
 	}
 	stripDivergeBaggage(&req.Header)
+	stripDivergeCookie(&req.Header)
 
 	if routingKey != "" && routingVal != "" {
 		req.Header.Set(routingKey, routingVal)
@@ -544,6 +617,37 @@ func stripDivergeBaggage(hdr *http.Header) {
 		hdr.Del("baggage")
 	} else {
 		hdr.Set("baggage", strings.Join(kept, ","))
+	}
+}
+
+// stripDivergeCookie removes any recorded diverge_env=<value> sticky-routing cookies from Cookie headers.
+func stripDivergeCookie(hdr *http.Header) {
+	vals := hdr.Values("Cookie")
+	if len(vals) == 0 {
+		return
+	}
+	var newVals []string
+	for _, rawVal := range vals {
+		parts := strings.Split(rawVal, ";")
+		kept := make([]string, 0, len(parts))
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" {
+				continue
+			}
+			lower := strings.ToLower(trimmed)
+			if lower == "diverge_env" || strings.HasPrefix(lower, "diverge_env=") {
+				continue
+			}
+			kept = append(kept, trimmed)
+		}
+		if len(kept) > 0 {
+			newVals = append(newVals, strings.Join(kept, "; "))
+		}
+	}
+	hdr.Del("Cookie")
+	for _, v := range newVals {
+		hdr.Add("Cookie", v)
 	}
 }
 

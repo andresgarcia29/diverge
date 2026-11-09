@@ -24,6 +24,10 @@ spec:
       description: "Optional staging/gateway URL to construct a shareable ?_diverge_env= preview URL"
       type: string
       default: ""
+    diverge_replay_from:
+      description: "Optional HAR (.har) or JSONL (.jsonl) trace file path to run diverge replay after deployment"
+      type: string
+      default: ""
     diverge_kubectl_version:
       description: "Version of kubectl to install"
       type: string
@@ -47,6 +51,7 @@ diverge:preview:
     DIVERGE_REGISTRY: $[[ inputs.diverge_registry ]]
     DIVERGE_NAMESPACE: $[[ inputs.diverge_namespace ]]
     DIVERGE_BASE_URL: $[[ inputs.diverge_base_url ]]
+    DIVERGE_REPLAY_FROM: $[[ inputs.diverge_replay_from ]]
   artifacts:
     reports:
       dotenv: preview.env
@@ -143,6 +148,18 @@ diverge:preview:
       IFS="$OLD_IFS"
 
       kubectl apply -f previewgroup.yaml
+
+      if [ -n "${DIVERGE_REPLAY_FROM:-}" ]; then
+        if ! command -v diverge >/dev/null 2>&1; then
+          curl -fsSL https://raw.githubusercontent.com/divergedev/diverge/main/install.sh | sh
+        fi
+        kubectl wait -n "${DIVERGE_NAMESPACE}" --for=condition=Ready "previewgroup/${PREVIEW_NAME}" --timeout=180s
+        if [ -n "${DIVERGE_BASE_URL:-}" ]; then
+          diverge replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}" --base-url "${DIVERGE_BASE_URL}"
+        else
+          diverge replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}"
+        fi
+      fi
 
       PREVIEW_URL=""
       if [ -n "${DIVERGE_BASE_URL:-}" ]; then

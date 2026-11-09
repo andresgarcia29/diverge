@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/divergedev/diverge/api/v1alpha1"
+	"github.com/divergedev/diverge/pkg/doctor"
+	"github.com/divergedev/diverge/pkg/replay"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +39,8 @@ Use ` + "`/diverge <command>`" + ` in any PR or MR comment to manage preview env
 | ` + "`/diverge resume [+$amount] [tokens]`" + ` | Resume agent with optional budget bump | ` + "`/diverge resume +$5.00`" + ` |
 | ` + "`/diverge status`" + ` | Report active tasks and preview environments | ` + "`/diverge status`" + ` |
 | ` + "`/diverge preview`" + ` | Deploy preview environment for this branch | ` + "`/diverge preview`" + ` |
+| ` + "`/diverge verify [path]`" + ` | Run health diagnostics & HTTP probe against preview | ` + "`/diverge verify /healthz`" + ` |
+| ` + "`/diverge replay [path ...]`" + ` | Replay baseline vs preview parity checks | ` + "`/diverge replay /api/v1/health /api/v1/status`" + ` |
 | ` + "`/diverge extend-ttl [duration]`" + ` | Extend preview TTL (default 24h) | ` + "`/diverge extend-ttl 48h`" + ` |
 | ` + "`/diverge teardown`" + ` | Tear down preview environment & agent tasks | ` + "`/diverge teardown`" + ` |
 | ` + "`/diverge help`" + ` | Show this command reference | ` + "`/diverge help`" + ` |
@@ -49,6 +54,7 @@ type SlashCommand struct {
 	Duration  time.Duration
 	BudgetUSD string
 	Tokens    int64
+	Paths     []string
 }
 
 // ParseSlashCommand parses a PR/MR comment body for a /diverge slash command.
@@ -56,6 +62,8 @@ type SlashCommand struct {
 //   - /diverge fix <objective>
 //   - /diverge guide <instruction>
 //   - /diverge preview
+//   - /diverge verify [path ...]
+//   - /diverge replay [path ...]
 //   - /diverge teardown
 //   - /diverge extend-ttl [duration]
 //   - /diverge pause
@@ -99,6 +107,15 @@ func ParseSlashCommand(commentBody string) (*SlashCommand, bool) {
 			return &SlashCommand{
 				Action: "preview",
 			}, true
+		case "verify", "replay":
+			paths, ok := parseSafeRelativePaths(fields[1:])
+			if !ok {
+				return nil, false
+			}
+			return &SlashCommand{
+				Action: subcmd,
+				Paths:  paths,
+			}, true
 		case "teardown":
 			return &SlashCommand{
 				Action: "teardown",
@@ -141,6 +158,21 @@ func ParseSlashCommand(commentBody string) (*SlashCommand, bool) {
 		}
 	}
 	return nil, false
+}
+
+func parseSafeRelativePaths(tokens []string) ([]string, bool) {
+	if len(tokens) == 0 {
+		return []string{"/"}, true
+	}
+	paths := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		p := strings.TrimSpace(tok)
+		if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.Contains(p, "..") {
+			return nil, false
+		}
+		paths = append(paths, p)
+	}
+	return paths, true
 }
 
 func parseResumeArgs(fields []string) (string, int64, error) {
@@ -196,6 +228,10 @@ func ExecuteSlashCommandWithFeedback(ctx context.Context, c client.Client, ns st
 		return executeGuideCommand(ctx, c, ns, cmd.Guidance, repoURL, prNumber)
 	case "preview":
 		return executePreviewCommand(ctx, c, ns, repoURL, branch, prNumber)
+	case "verify":
+		return executeVerifyCommand(ctx, c, ns, cmd.Paths, repoURL, prNumber)
+	case "replay":
+		return executeReplayCommand(ctx, c, ns, cmd.Paths, repoURL, prNumber)
 	case "teardown":
 		return executeTeardownCommand(ctx, c, ns, repoURL, prNumber)
 	case "extend-ttl":
@@ -357,6 +393,185 @@ func executePreviewCommand(ctx context.Context, c client.Client, ns, repoURL, br
 
 	feedback := fmt.Sprintf("🔄 **Preview environment requested**: `%s` (branch: `%s`)\n\nDiverge is provisioning your preview stack.", envName, branch)
 	return feedback, nil
+}
+
+func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (envName, baseURL, headerKey, headerValue string, found bool, err error) {
+	envs, err := findMatchingEnvironments(ctx, c, ns, repoURL, prNumber)
+	if err != nil {
+		return "", "", "", "", false, err
+	}
+	pgs, err := findMatchingPreviewGroups(ctx, c, repoURL, prNumber)
+	if err != nil {
+		return "", "", "", "", false, err
+	}
+	if len(envs) == 0 && len(pgs) == 0 {
+		return "", "", "", "", false, nil
+	}
+
+	headerKey = replay.DefaultHeaderKey
+	if len(envs) > 0 {
+		env := envs[0]
+		envName = env.Name
+		if env.Spec.Routing.HeaderKey != "" {
+			headerKey = env.Spec.Routing.HeaderKey
+		}
+		if env.Spec.Routing.HeaderValue != "" {
+			headerValue = env.Spec.Routing.HeaderValue
+		}
+		if env.Status.URL != "" {
+			baseURL = stripPreviewQueryParam(env.Status.URL)
+		}
+	}
+	if len(pgs) > 0 {
+		pg := pgs[0]
+		if envName == "" {
+			envName = pg.Name
+		}
+		if pg.Spec.Routing.HeaderKey != "" {
+			headerKey = pg.Spec.Routing.HeaderKey
+		}
+		if pg.Spec.Routing.HeaderValue != "" && headerValue == "" {
+			headerValue = pg.Spec.Routing.HeaderValue
+		}
+	}
+	if headerValue == "" {
+		headerValue = envName
+	}
+	return envName, baseURL, headerKey, headerValue, true, nil
+}
+
+func stripPreviewQueryParam(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return strings.TrimSpace(rawURL)
+	}
+	q := parsed.Query()
+	q.Del("_diverge_env")
+	parsed.RawQuery = q.Encode()
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
+	envName, baseURL, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "⚠️ No active preview environment found for this PR/MR. Run `/diverge preview` first.", nil
+	}
+	if len(paths) == 0 {
+		paths = []string{"/"}
+	}
+
+	diagnoser := doctor.NewDiagnoser(c)
+	docReport, docErr := diagnoser.Diagnose(ctx, ns, envName)
+	docSkipped := docErr != nil && (runtime.IsNotRegisteredError(docErr) || strings.Contains(docErr.Error(), "no kind is registered"))
+
+	var b strings.Builder
+	docHealthy := docSkipped || (docErr == nil && docReport != nil && docReport.Healthy)
+	replayPassed := true
+	var repReport *replay.Report
+	if baseURL != "" {
+		entries := make([]replay.RequestEntry, 0, len(paths))
+		for _, p := range paths {
+			entries = append(entries, replay.RequestEntry{
+				ID:     fmt.Sprintf("GET %s", p),
+				Method: "GET",
+				Path:   p,
+			})
+		}
+		repReport, err = replay.NewRunner(replay.Config{
+			Environment:      envName,
+			BaseURL:          baseURL,
+			HeaderKey:        headerKey,
+			HeaderValue:      headerValue,
+			FailOnStatusDiff: true,
+			Timeout:          5 * time.Second,
+		}).Run(ctx, entries)
+		if err != nil {
+			replayPassed = false
+		} else if repReport != nil {
+			replayPassed = repReport.Passed
+		}
+	}
+
+	overallPassed := docHealthy && replayPassed
+	if overallPassed {
+		fmt.Fprintf(&b, "### ✅ Diverge Verify Passed: `%s`\n\n", envName)
+	} else {
+		fmt.Fprintf(&b, "### ❌ Diverge Verify Failed: `%s`\n\n", envName)
+	}
+
+	if docSkipped {
+		b.WriteString("- **Workload Diagnostics**: ✅ Preview environment resource verified\n")
+	} else if docErr != nil {
+		fmt.Fprintf(&b, "- **Workload Diagnostics**: ❌ Error (`%v`)\n", docErr)
+	} else if docReport != nil && docReport.Healthy {
+		b.WriteString("- **Workload Diagnostics**: ✅ All preview workloads, migrations, and routes healthy\n")
+	} else if docReport != nil {
+		fmt.Fprintf(&b, "- **Workload Diagnostics**: ❌ %d issue(s) detected\n", len(docReport.Issues))
+	}
+
+	if baseURL == "" {
+		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (preview URL not yet assigned in `status.url`)\n")
+		return b.String(), nil
+	}
+
+	if err != nil {
+		fmt.Fprintf(&b, "- **HTTP Probe**: ❌ Error (`%v`)\n", err)
+		return b.String(), nil
+	}
+
+	if repReport != nil {
+		b.WriteString("\n")
+		var mdBuf bytes.Buffer
+		_ = replay.FormatMarkdown(&mdBuf, repReport)
+		b.WriteString(mdBuf.String())
+	}
+	return b.String(), nil
+}
+
+func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
+	envName, baseURL, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "⚠️ No active preview environment found for this PR/MR. Run `/diverge preview` first.", nil
+	}
+	if baseURL == "" {
+		return fmt.Sprintf("⚠️ Preview environment `%s` does not have an active target URL yet (`status.url` is empty).", envName), nil
+	}
+	if len(paths) == 0 {
+		paths = []string{"/"}
+	}
+
+	entries := make([]replay.RequestEntry, 0, len(paths))
+	for _, p := range paths {
+		entries = append(entries, replay.RequestEntry{
+			ID:     fmt.Sprintf("GET %s", p),
+			Method: "GET",
+			Path:   p,
+		})
+	}
+
+	report, err := replay.NewRunner(replay.Config{
+		Environment:      envName,
+		BaseURL:          baseURL,
+		HeaderKey:        headerKey,
+		HeaderValue:      headerValue,
+		FailOnStatusDiff: true,
+		Timeout:          10 * time.Second,
+	}).Run(ctx, entries)
+	if err != nil {
+		return "", err
+	}
+
+	var mdBuf bytes.Buffer
+	if err := replay.FormatMarkdown(&mdBuf, report); err != nil {
+		return "", err
+	}
+	return mdBuf.String(), nil
 }
 
 func executeTeardownCommand(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (string, error) {

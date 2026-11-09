@@ -211,6 +211,69 @@ func TestResolveEntryURL_RewriteAndSSRF(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
+	var seenAuth, seenCookie, seenCustom string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenCookie = r.Header.Get("Cookie")
+		seenCustom = r.Header.Get("X-Secret-Token")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	entries := []RequestEntry{
+		{
+			ID:     "keep-staging",
+			Method: "GET",
+			Path:   "https://staging.example.com/api/v1/orders",
+			Headers: map[string]string{
+				"Authorization":  "Bearer secret-jwt",
+				"Cookie":         "diverge_env=pr-10; session=abc",
+				"X-Secret-Token": "top-secret",
+			},
+		},
+		{
+			ID:     "drop-analytics",
+			Method: "POST",
+			Path:   "https://analytics.thirdparty.io/collect",
+		},
+	}
+
+	// Verify cookie stripping when StripAuth is false
+	runnerKeepSession := NewRunner(Config{
+		Environment:        "pr-42",
+		BaseURL:            srv.URL,
+		FilterHosts:        []string{"*.example.com"},
+		StripHeaders:       []string{"X-Secret-Token"},
+		FailOnStatusDiff:   true,
+		FailOnContractDiff: true,
+	})
+	report, err := runnerKeepSession.Run(context.Background(), entries)
+	require.NoError(t, err)
+	assert.True(t, report.Passed)
+	require.Len(t, report.Results, 1)
+	assert.Equal(t, "keep-staging", report.Results[0].ID)
+	assert.Equal(t, "Bearer secret-jwt", seenAuth)
+	assert.Equal(t, "session=abc", seenCookie)
+	assert.Empty(t, seenCustom)
+
+	// Verify StripAuth removes Authorization and Cookie completely
+	runnerStripAuth := NewRunner(Config{
+		Environment:        "pr-42",
+		BaseURL:            srv.URL,
+		FilterHosts:        []string{"staging.example.com"},
+		StripAuth:          true,
+		FailOnStatusDiff:   true,
+		FailOnContractDiff: true,
+	})
+	report2, err := runnerStripAuth.Run(context.Background(), entries)
+	require.NoError(t, err)
+	assert.True(t, report2.Passed)
+	assert.Empty(t, seenAuth)
+	assert.Empty(t, seenCookie)
+}
+
 func TestFormatReportOutputs(t *testing.T) {
 	report := &Report{
 		Environment:      "pr-42",

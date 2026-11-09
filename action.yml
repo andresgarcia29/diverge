@@ -7,7 +7,7 @@ branding:
 
 inputs:
   action:
-    description: "Action to perform: validate, diff, deploy, verify, or teardown"
+    description: "Action to perform: validate, diff, deploy, verify, replay, or teardown"
     required: false
     default: "deploy"
   version:
@@ -94,6 +94,46 @@ inputs:
     description: "Maximum allowed HTTP latency during verify (e.g. 2s)"
     required: false
     default: "5s"
+  replay:
+    description: "Run diverge replay after deploy (true/false)"
+    required: false
+    default: "false"
+  replay-from:
+    description: "Path to HAR (.har) or JSONL (.jsonl) trace file for diverge replay"
+    required: false
+    default: ""
+  replay-max-latency:
+    description: "Maximum allowed preview latency per replayed request (e.g. 500ms, 2s)"
+    required: false
+    default: ""
+  replay-compare-values:
+    description: "Compare exact scalar values during replay instead of structural types (true/false)"
+    required: false
+    default: "false"
+  replay-fail-on-extra-fields:
+    description: "Fail replay when preview adds new fields not present in baseline (true/false)"
+    required: false
+    default: "false"
+  replay-ignore-fields:
+    description: "Comma-separated field paths or Protobuf field numbers to ignore during replay"
+    required: false
+    default: ""
+  replay-filter-hosts:
+    description: "Comma-separated host patterns to include from HAR/JSONL traces during replay"
+    required: false
+    default: ""
+  replay-strip-auth:
+    description: "Strip recorded Authorization/X-Api-Key headers from replayed traces (true/false)"
+    required: false
+    default: "false"
+  replay-proto-descriptor:
+    description: "Optional compiled Protobuf FileDescriptorSet (.pb/.desc) for named-field Protobuf diffs"
+    required: false
+    default: ""
+  replay-proto-message:
+    description: "Fully-qualified Protobuf response message name when using replay-proto-descriptor"
+    required: false
+    default: ""
   dry-run:
     description: "Render PreviewGroup manifest without applying to Kubernetes"
     required: false
@@ -161,5 +201,15 @@ runs:
         INPUT_VERIFY_PATH: ${{ inputs.verify-path }}
         INPUT_VERIFY_COMPARE_BASELINE: ${{ inputs.verify-compare-baseline }}
         INPUT_VERIFY_MAX_LATENCY: ${{ inputs.verify-max-latency }}
+        INPUT_REPLAY: ${{ inputs.replay }}
+        INPUT_REPLAY_FROM: ${{ inputs.replay-from }}
+        INPUT_REPLAY_MAX_LATENCY: ${{ inputs.replay-max-latency }}
+        INPUT_REPLAY_COMPARE_VALUES: ${{ inputs.replay-compare-values }}
+        INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS: ${{ inputs.replay-fail-on-extra-fields }}
+        INPUT_REPLAY_IGNORE_FIELDS: ${{ inputs.replay-ignore-fields }}
+        INPUT_REPLAY_FILTER_HOSTS: ${{ inputs.replay-filter-hosts }}
+        INPUT_REPLAY_STRIP_AUTH: ${{ inputs.replay-strip-auth }}
+        INPUT_REPLAY_PROTO_DESCRIPTOR: ${{ inputs.replay-proto-descriptor }}
+        INPUT_REPLAY_PROTO_MESSAGE: ${{ inputs.replay-proto-message }}
         INPUT_DRY_RUN: ${{ inputs.dry-run }}
       run: "${{ github.action_path }}/scripts/ci-preview.sh"

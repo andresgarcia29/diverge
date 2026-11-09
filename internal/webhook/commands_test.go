@@ -2,6 +2,8 @@ package webhook
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -42,6 +44,43 @@ func TestParseSlashCommand(t *testing.T) {
 			wantCmd: &SlashCommand{
 				Action: "preview",
 			},
+		},
+		{
+			name:   "verify command default path",
+			body:   "/diverge verify",
+			wantOK: true,
+			wantCmd: &SlashCommand{
+				Action: "verify",
+				Paths:  []string{"/"},
+			},
+		},
+		{
+			name:   "verify command explicit path",
+			body:   "/diverge verify /healthz",
+			wantOK: true,
+			wantCmd: &SlashCommand{
+				Action: "verify",
+				Paths:  []string{"/healthz"},
+			},
+		},
+		{
+			name:   "replay command multiple paths",
+			body:   "/diverge replay /api/v1/health /api/v1/orders",
+			wantOK: true,
+			wantCmd: &SlashCommand{
+				Action: "replay",
+				Paths:  []string{"/api/v1/health", "/api/v1/orders"},
+			},
+		},
+		{
+			name:   "replay command rejects external url or traversal",
+			body:   "/diverge replay https://evil.example.com/pwn",
+			wantOK: false,
+		},
+		{
+			name:   "verify command rejects path traversal",
+			body:   "/diverge verify /../etc/passwd",
+			wantOK: false,
 		},
 		{
 			name:   "teardown command",
@@ -167,6 +206,7 @@ func TestParseSlashCommand(t *testing.T) {
 				assert.Equal(t, tc.wantCmd.Duration, cmd.Duration)
 				assert.Equal(t, tc.wantCmd.BudgetUSD, cmd.BudgetUSD)
 				assert.Equal(t, tc.wantCmd.Tokens, cmd.Tokens)
+				assert.Equal(t, tc.wantCmd.Paths, cmd.Paths)
 			}
 		})
 	}
@@ -424,4 +464,66 @@ func TestExecuteSlashCommand_StatusAndHelp(t *testing.T) {
 	assert.Contains(t, feedback, "Autonomous Agent Tasks")
 	assert.Contains(t, feedback, "implement catalog filter")
 	assert.Contains(t, feedback, "Preview Environments")
+}
+
+func TestExecuteSlashCommand_VerifyAndReplay(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient()
+
+	repoURL := "https://github.com/divergedev/demo-checkout-api"
+	branch := "feat/checkout"
+	prNumber := 77
+
+	// 1. Verify and replay before preview exists returns friendly warning
+	verifyCmd, ok := ParseSlashCommand("/diverge verify /healthz")
+	require.True(t, ok)
+	feedback, err := ExecuteSlashCommandWithFeedback(ctx, c, "default", verifyCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+	assert.Contains(t, feedback, "No active preview environment found")
+
+	// 2. Stand up httptest gateway that routes based on x-diverge-env
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isPreview := r.Header.Get("x-diverge-env") == "pr-77"
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if isPreview {
+			_, _ = w.Write([]byte(`{"status":"ok","env":"preview","items":3}`))
+		} else {
+			_, _ = w.Write([]byte(`{"status":"ok","env":"baseline","items":2}`))
+		}
+	}))
+	defer srv.Close()
+
+	// Create and populate Environment with Running status and URL
+	previewCmd, _ := ParseSlashCommand("/diverge preview")
+	_, err = ExecuteSlashCommandWithFeedback(ctx, c, "default", previewCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+
+	envName := previewEnvName("pr", "divergedev/demo-checkout-api", prNumber)
+	var env v1alpha1.Environment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: envName, Namespace: "default"}, &env))
+	env.Spec.Routing = v1alpha1.EnvironmentRouting{
+		Mode:        "header",
+		HeaderKey:   "x-diverge-env",
+		HeaderValue: "pr-77",
+	}
+	env.Status.Phase = v1alpha1.PhaseRunning
+	env.Status.URL = srv.URL + "/?_diverge_env=pr-77"
+	require.NoError(t, c.Update(ctx, &env))
+
+	// 3. Execute /diverge verify /healthz
+	feedback, err = ExecuteSlashCommandWithFeedback(ctx, c, "default", verifyCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+	assert.Contains(t, feedback, "Diverge Verify Passed")
+	assert.Contains(t, feedback, "Workload Diagnostics")
+	assert.Contains(t, feedback, "/healthz")
+
+	// 4. Execute /diverge replay /api/v1/checkout /healthz
+	replayCmd, ok := ParseSlashCommand("/diverge replay /api/v1/checkout /healthz")
+	require.True(t, ok)
+	feedback, err = ExecuteSlashCommandWithFeedback(ctx, c, "default", replayCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+	assert.Contains(t, feedback, "Diverge Traffic Replay Passed")
+	assert.Contains(t, feedback, "/api/v1/checkout")
+	assert.Contains(t, feedback, "/healthz")
 }

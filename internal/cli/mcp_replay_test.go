@@ -142,4 +142,24 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, missingRes.IsError)
+
+	// Supports filter_hosts and strip_auth in MCP tool parameters
+	filteredArgs, err := json.Marshal(map[string]any{
+		"name":         "pr-99",
+		"base_url":     srv.URL,
+		"routing_key":  "pr-99",
+		"filter_hosts": []string{"api.example.com"},
+		"strip_auth":   true,
+		"requests": []map[string]any{
+			{"id": "profile", "method": "GET", "path": "/api/v1/profile", "headers": map[string]string{"Authorization": "Bearer secret"}},
+			{"id": "thirdparty", "method": "GET", "path": "https://cdn.other.example/bundle.js"},
+		},
+	})
+	require.NoError(t, err)
+	filteredRes, err := handler(context.Background(), mcpruntime.ToolRequest{
+		ToolName:  "diverge_replay",
+		Arguments: filteredArgs,
+	})
+	require.NoError(t, err)
+	assert.False(t, filteredRes.IsError)
 }

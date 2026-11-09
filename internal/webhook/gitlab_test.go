@@ -364,7 +364,7 @@ func TestGitLabWebhookNoteSlashCommand(t *testing.T) {
 	handler := &GitLabWebhookHandler{
 		Client:       fakeK8s,
 		Config:       WebhookConfig{SecretToken: "secret"},
-		AllowedUsers: []string{"maintainer"},
+		AllowedUsers: []string{"10"},
 		DefaultNS:    "preview",
 	}
 
@@ -471,7 +471,7 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 	handler := &GitLabWebhookHandler{
 		Client:       fakeK8s,
 		Config:       WebhookConfig{SecretToken: "secret"},
-		AllowedUsers: []string{"trusted-dev"},
+		AllowedUsers: []string{"1"},
 		DefaultNS:    "preview",
 	}
 
@@ -493,10 +493,10 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 			}`,
 		},
 		{
-			name: "unauthorized user not in AllowedUsers is ignored",
+			name: "unauthorized user ID not in AllowedUsers is ignored even with matching username",
 			body: `{
 				"object_kind": "note",
-				"user": {"id": 2, "username": "external-user"},
+				"user": {"id": 2, "username": "trusted-dev"},
 				"object_attributes": {
 					"note": "/diverge fix should not run for untrusted user",
 					"noteable_type": "MergeRequest"
@@ -531,9 +531,11 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 	}
 
 	t.Run("empty AllowedUsers fails closed", func(t *testing.T) {
+		commenter := &testMockCommenter{}
 		unconfiguredHandler := &GitLabWebhookHandler{
 			Client:    fakeK8s,
 			Config:    WebhookConfig{SecretToken: "secret"},
+			Commenter: commenter,
 			DefaultNS: "preview",
 		}
 		body := `{
@@ -555,6 +557,9 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("Expected 200, got %d", rr.Code)
 		}
+		if len(commenter.postedComments) != 0 {
+			t.Fatalf("Expected 0 comments posted, got %d", len(commenter.postedComments))
+		}
 	})
 }
 
@@ -568,7 +573,7 @@ func TestGitLabWebhookNoteWithCommenterFeedback(t *testing.T) {
 		Client:       fakeK8s,
 		Config:       WebhookConfig{SecretToken: "secret"},
 		Commenter:    commenter,
-		AllowedUsers: []string{"developer"},
+		AllowedUsers: []string{"1"},
 		DefaultNS:    "preview",
 	}
 

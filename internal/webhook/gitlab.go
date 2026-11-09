@@ -82,12 +82,11 @@ type GitLabNotePayload struct {
 	} `json:"project"`
 }
 
+// isAuthorizedGitLabCommenter returns true if the GitLab Note Hook commenter has a
+// positive numeric user ID, satisfies any reported AuthorAssociation role check, and
+// matches an immutable numeric user ID in the fail-closed AllowedUsers allowlist.
 func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePayload) bool {
-	if payload == nil {
-		return false
-	}
-	username := strings.TrimSpace(payload.User.Username)
-	if username == "" {
+	if payload == nil || payload.User.ID <= 0 {
 		return false
 	}
 	if assoc := strings.ToUpper(strings.TrimSpace(payload.ObjectAttributes.AuthorAssociation)); assoc != "" {
@@ -100,9 +99,9 @@ func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePa
 	if len(h.AllowedUsers) == 0 {
 		return false
 	}
+	userID := strconv.Itoa(payload.User.ID)
 	for _, allowed := range h.AllowedUsers {
-		trimmed := strings.TrimSpace(allowed)
-		if trimmed != "" && strings.EqualFold(trimmed, username) {
+		if strings.TrimSpace(allowed) == userID {
 			return true
 		}
 	}
@@ -204,7 +203,7 @@ func (h *GitLabWebhookHandler) handleNoteEvent(ctx context.Context, w http.Respo
 	}
 
 	if !h.isAuthorizedGitLabCommenter(&payload) {
-		logger.Info("Ignoring slash command from unauthorized GitLab commenter", "username", payload.User.Username)
+		logger.Info("Ignoring slash command from unauthorized GitLab commenter", "userID", payload.User.ID, "username", payload.User.Username)
 		w.WriteHeader(http.StatusOK)
 		return
 	}

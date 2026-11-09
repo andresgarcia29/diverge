@@ -48,8 +48,10 @@ jobs:
             if KUBEBUILDER_ASSETS="$("$go_path/bin/setup-envtest" use 1.32.x --bin-dir /tmp/envtest -p path)"; then
               break
             fi
-            echo "setup-envtest download attempt ${attempt} failed; retrying..." >&2
-            sleep $((attempt * 3))
+            if [ "$attempt" -lt 5 ]; then
+              echo "setup-envtest download attempt ${attempt} failed; retrying..." >&2
+              sleep $((attempt * 3))
+            fi
           done
           test -n "${KUBEBUILDER_ASSETS:-}"
           export KUBEBUILDER_ASSETS

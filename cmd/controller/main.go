@@ -99,7 +99,7 @@ func main() {
 	flag.StringVar(&sandboxProvider, "sandbox-provider", "agent-sandbox", "Default sandbox provider (agent-sandbox, noop)")
 	flag.BoolVar(&enableGAMMA, "enable-gamma", false, "Enable GAMMA mesh routing for PreviewGroups (requires Istio Ambient or GAMMA-compatible mesh)")
 	flag.StringVar(&webhookSecretToken, "webhook-secret-token", "", "The secret token for authenticating webhooks (prefer DIVERGE_WEBHOOK_SECRET env var).")
-	flag.StringVar(&gitlabAllowedUsersRaw, "gitlab-allowed-users", "", "Comma-separated list of GitLab usernames authorized to execute /diverge MR slash commands (or set DIVERGE_GITLAB_ALLOWED_USERS).")
+	flag.StringVar(&gitlabAllowedUsersRaw, "gitlab-allowed-users", "", "Comma-separated list of numeric GitLab user IDs authorized to execute /diverge MR slash commands (or set DIVERGE_GITLAB_ALLOWED_USERS).")
 	flag.StringVar(&defaultNamespace, "default-namespace", "default", "Default namespace to create environments in")
 
 	var kedaMinReplicas int64
@@ -144,7 +144,7 @@ func main() {
 	if envSecret := os.Getenv("DIVERGE_WEBHOOK_SECRET"); envSecret != "" {
 		webhookSecretToken = envSecret
 	}
-	if envAllowed := os.Getenv("DIVERGE_GITLAB_ALLOWED_USERS"); envAllowed != "" {
+	if envAllowed, ok := os.LookupEnv("DIVERGE_GITLAB_ALLOWED_USERS"); ok {
 		gitlabAllowedUsersRaw = envAllowed
 	}
 	var gitlabAllowedUsers []string
@@ -383,6 +383,9 @@ func main() {
 			HTTPClient: &http.Client{Timeout: 15 * time.Second},
 		}
 		glCommenter = notifier.NewGitLabNotifier(firstNonEmpty(os.Getenv("DIVERGE_BASE_URL"), os.Getenv("GITLAB_API_URL")), notifierToken)
+	}
+	if notifierProvider == "gitlab" && len(gitlabAllowedUsers) == 0 {
+		setupLog.Info("WARNING: GitLab MR slash commands are disabled because no allowed user IDs are configured; set --gitlab-allowed-users or DIVERGE_GITLAB_ALLOWED_USERS")
 	}
 	mgr.GetWebhookServer().Register("/gitlab-webhook", &webhook.GitLabWebhookHandler{
 		Client:        mgr.GetClient(),

@@ -26,6 +26,9 @@ spec:
         - --routing-provider={{ .Values.routingProvider }}
         - --leader-elect
         - --webhook-port={{ .Values.webhook.port }}
+        {{- if and .Values.webhook .Values.webhook.gitlabAllowedUsers }}
+        - --gitlab-allowed-users={{ .Values.webhook.gitlabAllowedUsers }}
+        {{- end }}
         {{- if .Values.database }}
         - --database-provider={{ .Values.database.provider | default "noop" }}
         {{- end }}
@@ -165,6 +168,10 @@ spec:
               name: {{ .Values.webhook.secretName }}
               key: token
               optional: true
+        {{- end }}
+        {{- if and .Values.webhook .Values.webhook.gitlabAllowedUsers }}
+        - name: DIVERGE_GITLAB_ALLOWED_USERS
+          value: {{ .Values.webhook.gitlabAllowedUsers | quote }}
         {{- end }}
         ports:
         - containerPort: {{ .Values.webhook.port }}

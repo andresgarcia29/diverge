@@ -36,6 +36,9 @@ services:
 
 Use the official `divergedev/diverge@v0.21.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), replay recorded traffic traces (`replay: "true"` with `replay-from` set to a `.jsonl` or `.har` trace file), and expose routing headers to Playwright or Cypress:
 
+> [!WARNING]
+> **Sanitize replay traces before replaying in PR workflows**: Remove live credentials and sensitive request or response bodies from `.jsonl` / `.har` trace files before replaying them in workflows that execute untrusted PR code. Setting `replay-strip-auth: "true"` strips only the recorded `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers and does not sanitize request/response bodies, URL query parameters, or other custom headers.
+
 ```yaml
 name: Preview Environment
 
@@ -245,7 +248,7 @@ In addition to CI-driven preview deployments, Diverge's webhook handlers execute
 
 ### Webhook Event Subscriptions
 - **GitHub**: Subscribe your webhook (`/github-webhook`) to **Issue comments** (`issue_comment`) in addition to **Pull requests** (`pull_request`). For security, only comments on Pull Requests from repository `OWNER`, `MEMBER`, or `COLLABORATOR` accounts are executed.
-- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`, and configure authorized GitLab usernames on the controller via `--gitlab-allowed-users` or `DIVERGE_GITLAB_ALLOWED_USERS` (comma-separated; the webhook fails closed when `AllowedUsers` is empty).
+- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`, and configure authorized numeric GitLab user IDs on the controller via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS` (comma-separated; the webhook fails closed when `AllowedUsers` is empty).
 
 ### PR / MR Slash Commands Reference
 

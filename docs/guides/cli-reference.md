@@ -31,6 +31,7 @@ The `diverge` CLI manages your local development environments and interacts with
 | `diverge preview delete <name>` | Delete a preview group |
 | `diverge preview watch <name>` | Watch a preview group until Ready/Failed |
 | `diverge providers list` | List all registered providers |
+| `diverge replay <env> --from <trace>` | Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traces against baseline and preview |
 | `diverge route <service>` | Simulate request routing to a service through the topology |
 | `diverge status` | Show active preview environments and groups |
 | `diverge task` | Manage spec-driven autonomous AI developer tasks (`init`, `create`, `status`, `list`, `logs`, `guide`, `pause`, `resume`, `delete`) |
@@ -325,6 +326,46 @@ diverge verify pr-42 --path /healthz --compare-baseline --max-latency 500ms
 
 # Verify in GitHub Actions and publish a step summary scorecard
 diverge verify pr-42 --path /healthz --compare-baseline --github-summary
+```
+
+### `diverge replay`
+
+Replay a deterministic request trace (`.jsonl`, `.har`, or `.json`) against both baseline (unrouted) and a candidate preview `Environment` or `PreviewGroup` (with `x-diverge-env` and W3C `baggage` injected). Compares HTTP status code parity, per-request and p50/p95 latency, JSON structural schemas, and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via `--proto-descriptor`). Automatically strips recorded `diverge_env` sticky-routing cookies from both baseline and preview requests so multi-cookie headers preserve non-routing cookies without contaminating baseline responses.
+
+**Usage:** `diverge replay <env-name> --from <trace.jsonl|trace.har|trace.json> [flags]`
+
+**Flags:**
+- `-f, --from` — Path to request trace file (`.jsonl`, `.har`, `.json`, or `-` for stdin)
+- `--base-url` — Override baseline gateway URL
+- `--preview-url` — Optional separate preview base URL (for subdomain-routed environments)
+- `--header-key` — Override routing header key (default: `x-diverge-env`)
+- `--header-value` — Override routing header value (default: environment name)
+- `-c, --concurrency` — Number of concurrent replay workers (default: `4`)
+- `--timeout` — Per-request HTTP timeout (default: `30s`)
+- `--max-latency` — Maximum acceptable preview response latency per request (e.g., `500ms`)
+- `--compare-values` — Compare exact scalar values in addition to JSON/Protobuf field types and wire schema
+- `--fail-on-extra-fields` — Treat newly added JSON keys or Protobuf tags in preview as breaking
+- `--fail-on-status-diff` — Fail if baseline and preview HTTP status codes differ (default: `true`)
+- `--fail-on-contract-diff` — Fail if breaking JSON or Protobuf contract diffs are detected (default: `true`)
+- `--ignore-field` — Field name or path to ignore during diffing (repeatable, e.g., `--ignore-field request_id`)
+- `--filter-host` — Retain only trace entries matching the given hostname or wildcard pattern (repeatable, e.g., `--filter-host api.example.com --filter-host '*.example.com'`)
+- `--strip-header` — Request header name to strip before replaying (repeatable, e.g., `--strip-header X-Internal-Token`)
+- `--strip-auth` — Strip `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers before replaying
+- `--proto-descriptor` — Optional path to compiled Protobuf `FileDescriptorSet` (`.binpb`) for schema-aware decoding
+- `--proto-message` — Default fully-qualified Protobuf message type for response decoding
+- `--json` — Output replay report as JSON
+- `--github-summary` — Write Markdown replay report to `$GITHUB_STEP_SUMMARY` (or stdout, or stderr when `--json` is set)
+
+**Examples:**
+```bash
+# Replay a JSONL trace against preview environment pr-42
+diverge replay pr-42 --from ./traces/checkout.jsonl
+
+# Replay a browser/Playwright HAR file, filtering to api.example.com and stripping captured auth headers
+diverge replay pr-42 --from ./recording.har --filter-host api.example.com --strip-auth --github-summary
+
+# Replay binary Protobuf/gRPC traffic with a compiled FileDescriptorSet (.binpb)
+diverge replay pr-42 --from ./grpc-trace.jsonl --proto-descriptor ./descriptors.binpb --proto-message acme.v1.ChargeResponse
 ```
 
 ### `diverge task`

@@ -67,14 +67,14 @@ diverge top --once
   <img src="docs/assets/delta-vs-duplicated.svg" alt="Delta Preview vs Traditional Full-Stack Duplication" width="100%">
 </p>
 
-### Turnkey CI/CD (`divergedev/diverge@v0.18.0`)
+### Turnkey CI/CD (`divergedev/diverge@v0.21.0`)
 
-Deploy a delta `PreviewGroup` for only the services modified in a Pull Request, run `diverge verify` health & latency SLO checks, and pass `routing-header-json` directly into Playwright E2E tests:
+Deploy a delta `PreviewGroup` for only the services modified in a Pull Request, run `diverge verify` health & latency SLO checks (or `diverge replay` contract diffing), and pass `routing-header-json` directly into Playwright E2E tests:
 
 ```yaml
 - name: Deploy Diverge Delta Preview
   id: diverge
-  uses: divergedev/diverge@v0.18.0
+  uses: divergedev/diverge@v0.21.0
   with:
     kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
     image-registry: ghcr.io/acme
@@ -110,7 +110,7 @@ See [charts/diverge/values.yaml](charts/diverge/values.yaml) for configuration o
 *   **Schema-per-Environment**: Actual execution of SQL-based schema provisioning (via `SQLExecutor`) with `public` schema write-protection, declarative `seedSource` seeding (`public`, `schema:<name>`, `configmap:<name>[/<key>]`) including foreign keys, sequences, and views, regex-validated naming, injection prevention, auto-generated `diverge-db-env-<env>` Secret (`DATABASE_URL` and `DIVERGE_PREVIEW_SCHEMA`), and automated migration Jobs.
 *   **MR-Triggered Lifecycle**: Environments spin up when a Merge Request opens and tear down upon merge/close.
 *   **Merge Gating**: GitLab/GitHub commit status checks (`diverge/preview`) block merges until environments are healthy.
-*   **Argo CD & Direct Deploy**: Argo CD GitOps (`Application` CRs) and No-ArgoCD mode (`DirectDeployer`) for Helm charts and Kustomize overlays.
+*   **Argo CD, Argo Rollouts & Direct Deploy**: Argo CD GitOps (`Application` CRs), Argo Rollouts progressive delivery (`--deployer=argo-rollouts` with canary `AnalysisTemplate` gates via `divergedev.com/analysis-template`), and No-ArgoCD mode (`DirectDeployer`) for Helm charts and Kustomize overlays.
 *   **Feature Flags & OpenFeature**: Isolated flag evaluation per preview environment. Out-of-the-box support for in-cluster `flagd` ConfigMaps, remote [Flipt](https://flipt.io) ephemeral namespaces, [Flagsmith](https://www.flagsmith.com) ephemeral identities, and [Unleash](https://www.getunleash.io) context-constrained strategies with automated cleanup on MR merge.
 *   **Environment Export**: `diverge env export` extracts environment variables from preview pods for local development (dotenv, JSON, shell formats).
 *   **Test Integration**: CI trigger and polling support to run automated tests against preview environments.
@@ -119,7 +119,7 @@ See [charts/diverge/values.yaml](charts/diverge/values.yaml) for configuration o
 *   **Security Hardened**: Macaroon capability tokens, webhook secret constant-time comparison, RFC 7230 header validation, safe SHA handling, ArgoCD namespace bypass prevention, IPv6-safe pod URLs, typed Server-Side Apply (SSA), and strict label validation.
 *   **Finalizer-Based Lifecycle**: Kubernetes finalizers ensure clean teardown of all resources (routing, database, sandboxes, ArgoCD apps) even during force-deletes.
 *   **TTL Auto-Expiry**: Automatic environment cleanup after configurable TTL with requeue-based expiry.
-*   **Multi-SCM Notifiers & Webhooks**: GitLab MR comments and GitHub PR comments with status updates and interactive PR/MR slash commands (`/diverge preview`, `/diverge fix <objective>`, `/diverge extend-ttl [duration]`, `/diverge teardown`, `/diverge pause`, `/diverge resume`).
+*   **Multi-SCM Notifiers & Webhooks**: GitLab MR comments and GitHub PR comments with status updates and interactive PR/MR slash commands (`/diverge preview`, `/diverge verify [path]`, `/diverge replay [path1,path2,...]`, `/diverge fix <objective>`, `/diverge extend-ttl [duration]`, `/diverge teardown`, `/diverge pause`, `/diverge resume`).
 *   **E2E Tested**: End-to-end tests with Kind/k3d, Envoy Gateway, Istio, Cilium, Linkerd, and real CRD reconciliation.
 *   **ConnectRPC API Server & Web Dashboard**: Opt-in API server (`server.enabled: true` in Helm) featuring an embedded React Web UI (`server.dashboard.enabled: true`), ConnectRPC (HTTP/1.1 + HTTP/2), OIDC JWT + K8s TokenReview + Macaroon authentication, namespace-scoped RBAC authorization, structured audit logging, list pagination, optimistic concurrency, and HTTP reverse tunnels.
 *   **Service Topology & Route Simulation**: `diverge route <service>` traces request paths through your service graph. `diverge graph show` renders the topology as Mermaid, DOT, or JSON.
@@ -192,6 +192,7 @@ The `diverge` CLI helps you manage environments efficiently:
 *   `diverge init` - Initialize a `.diverge.yaml` config (with automatic Postgres/Redis/S3/Kafka/Temporal stack detection) or local Kubernetes playground
 *   `diverge create` - Create a new environment
 *   `diverge curl` - Send HTTP requests to a preview environment and compare against baseline (`--compare-baseline`)
+*   `diverge replay` - Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic traces (`.jsonl`, `.har`, `.json`) against baseline and preview (`--filter-host`, `--strip-auth`, `--github-summary`)
 *   `diverge verify` - Verify preview environment workload health (`doctor`), HTTP readiness, latency SLOs, and baseline parity (`--github-summary`)
 *   `diverge list` - List active environments
 *   `diverge status` - Check the status of an environment

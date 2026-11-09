@@ -17,6 +17,7 @@
 
 #### 💬 Interactive `/diverge verify` & `/diverge replay` PR/MR Slash Commands
 - **PR/MR Verification & Replay Slash Commands (`internal/webhook/commands.go`) (#329)**: Added `/diverge verify [path]` and `/diverge replay [path ...]` slash commands for GitHub Pull Requests and GitLab Merge Requests, running Kubernetes workload `doctor` diagnostics, routed HTTP readiness checks, and baseline-vs-preview JSON/Protobuf contract replay directly from PR/MR comments and posting a Markdown scorecard reply.
+- **Upgrade Note — Fail-Closed GitLab Slash-Command Authorization (`internal/webhook/gitlab.go`, `cmd/controller/main.go`, `charts/diverge/`) (#330)**: GitLab `Note Hook` MR slash commands now require an explicit allowlist of immutable numeric GitLab user IDs configured via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS`. Upgrading with the empty default disables GitLab MR slash-command execution (returning HTTP 200 without feedback); configure authorized numeric GitLab user IDs before upgrading.
 
 ---
 

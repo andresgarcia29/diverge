@@ -248,7 +248,7 @@ In addition to CI-driven preview deployments, Diverge's webhook handlers execute
 
 ### Webhook Event Subscriptions
 - **GitHub**: Subscribe your webhook (`/github-webhook`) to **Issue comments** (`issue_comment`) in addition to **Pull requests** (`pull_request`). For security, only comments on Pull Requests from repository `OWNER`, `MEMBER`, or `COLLABORATOR` accounts are executed.
-- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`, and configure authorized numeric GitLab user IDs on the controller via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS` (comma-separated; the webhook fails closed when `AllowedUsers` is empty).
+- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`, and configure authorized numeric GitLab user IDs on the controller via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS` (comma-separated; when `AllowedUsers` is empty, MR slash commands fail closed and return HTTP 200 without feedback, while authenticated merge-request lifecycle events continue to create, update, or delete preview environments).
 
 ### PR / MR Slash Commands Reference
 

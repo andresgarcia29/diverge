@@ -358,6 +358,7 @@ func TestGitLabWebhookDeletesOnMerge(t *testing.T) {
 	}
 }
 
+// TestGitLabWebhookNoteSlashCommand verifies that an authorized GitLab Note Hook MR comment dispatches a slash command.
 func TestGitLabWebhookNoteSlashCommand(t *testing.T) {
 	fakeK8s := newTestClient()
 
@@ -465,6 +466,7 @@ func TestGitLabWebhookTraceparentPropagation(t *testing.T) {
 	}
 }
 
+// TestGitLabWebhookNoteAuthorization verifies that GitLab Note Hook slash commands enforce numeric user ID authorization and fail closed when AllowedUsers is empty.
 func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 	fakeK8s := newTestClient()
 
@@ -563,6 +565,7 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 	})
 }
 
+// TestGitLabWebhookNoteWithCommenterFeedback verifies that an authorized GitLab Note Hook slash command posts feedback via the configured Commenter.
 func TestGitLabWebhookNoteWithCommenterFeedback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = divergeiov1alpha1.AddToScheme(scheme)

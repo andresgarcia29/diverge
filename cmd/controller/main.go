@@ -65,6 +65,7 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// main initializes and starts the Diverge controller manager, webhook handlers, and background reconcilers.
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
@@ -384,7 +385,7 @@ func main() {
 		}
 		glCommenter = notifier.NewGitLabNotifier(firstNonEmpty(os.Getenv("DIVERGE_BASE_URL"), os.Getenv("GITLAB_API_URL")), notifierToken)
 	}
-	if notifierProvider == "gitlab" && len(gitlabAllowedUsers) == 0 {
+	if len(gitlabAllowedUsers) == 0 {
 		setupLog.Info("WARNING: GitLab MR slash commands are disabled because no allowed user IDs are configured; set --gitlab-allowed-users or DIVERGE_GITLAB_ALLOWED_USERS")
 	}
 	mgr.GetWebhookServer().Register("/gitlab-webhook", &webhook.GitLabWebhookHandler{

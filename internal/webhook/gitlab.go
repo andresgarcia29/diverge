@@ -187,6 +187,7 @@ func (h *GitLabWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleNoteEvent processes GitLab Note Hook webhook requests for Merge Request slash commands.
 func (h *GitLabWebhookHandler) handleNoteEvent(ctx context.Context, w http.ResponseWriter, bodyBytes []byte) {
 	logger := log.FromContext(ctx).WithName("gitlab-webhook")
 

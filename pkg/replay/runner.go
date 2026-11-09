@@ -40,6 +40,9 @@ type Config struct {
 	MaxLatency         time.Duration
 	FailOnStatusDiff   bool
 	FailOnContractDiff bool
+	FilterHosts        []string
+	StripHeaders       []string
+	StripAuth          bool
 	DiffOptions        DiffOptions
 	HTTPClient         *http.Client
 }
@@ -103,6 +106,9 @@ func NewRunner(cfg Config) *Runner {
 
 // Run replays the provided trace entries against baseline and preview endpoints.
 func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, error) {
+	if len(r.Config.FilterHosts) > 0 {
+		entries = FilterEntriesByHost(entries, r.Config.FilterHosts)
+	}
 	if len(entries) == 0 {
 		return nil, errors.New("cannot run replay with 0 trace entries")
 	}
@@ -191,6 +197,29 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 	return report, nil
 }
 
+type requestSanitizePolicy struct {
+	routingKey   string
+	routingVal   string
+	stripAuth    bool
+	stripHeaders []string
+}
+
+type sanitizePolicyContextKey struct{}
+
+type sanitizingRoundTripper struct {
+	base http.RoundTripper
+}
+
+// RoundTrip sanitizes outbound request headers and cookies (including any cookies injected by an http.CookieJar) before delegating to the underlying transport.
+func (s *sanitizingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
+		cloned := req.Clone(req.Context())
+		sanitizeRequestHeaders(cloned, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
+		req = cloned
+	}
+	return s.base.RoundTrip(req)
+}
+
 // secureHTTPClient returns an http.Client with dial-time SSRF IP validation and redirect target validation.
 func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
@@ -251,9 +280,10 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 		out = http.Client{Timeout: timeout}
 	}
 
+	var baseTransport http.RoundTripper
 	switch tr := out.Transport.(type) {
 	case nil:
-		out.Transport = &http.Transport{
+		baseTransport = &http.Transport{
 			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 50,
@@ -271,13 +301,19 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 		cloned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return safeDial(ctx, network, addr, origDial)
 		}
-		out.Transport = cloned
+		baseTransport = cloned
+	default:
+		baseTransport = tr
 	}
+	out.Transport = &sanitizingRoundTripper{base: baseTransport}
 
 	origRedirect := out.CheckRedirect
 	out.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := loadtest.ValidateTargetURL(req.URL.String()); err != nil {
 			return fmt.Errorf("redirect target prohibited: %w", err)
+		}
+		if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
+			sanitizeRequestHeaders(req, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
 		}
 		if origRedirect != nil {
 			return origRedirect(req, via)
@@ -321,7 +357,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		return res
 	}
 
-	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "")
+	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders)
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -330,7 +366,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue)
+	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -414,13 +450,19 @@ func normalizeGRPCStatus(status string) string {
 	return trimmed
 }
 
+// hasHTTPScheme reports whether raw starts with a case-insensitive http:// or https:// scheme.
+func hasHTTPScheme(raw string) bool {
+	return (len(raw) >= 7 && strings.EqualFold(raw[:7], "http://")) ||
+		(len(raw) >= 8 && strings.EqualFold(raw[:8], "https://"))
+}
+
 // ResolveEntryURL resolves a trace entry's path or URL against an optional base URL and validates against SSRF.
 func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	trimmedBase := strings.TrimSpace(baseURL)
 	trimmedPath := strings.TrimSpace(entryPath)
 
 	var finalURL string
-	if strings.HasPrefix(trimmedPath, "http://") || strings.HasPrefix(trimmedPath, "https://") {
+	if hasHTTPScheme(trimmedPath) {
 		if trimmedBase == "" {
 			finalURL = trimmedPath
 		} else {
@@ -461,12 +503,112 @@ func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	return finalURL, nil
 }
 
+// FilterEntriesByHost retains relative-path entries and absolute-URL entries whose hostname matches one of allowedHosts
+// (supporting exact hostname matches like "api.example.com" and wildcard subdomain patterns like "*.example.com").
+func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []RequestEntry {
+	if len(allowedHosts) == 0 {
+		return entries
+	}
+	var normalized []string
+	for _, h := range allowedHosts {
+		for _, part := range strings.Split(h, ",") {
+			cleaned := strings.ToLower(strings.TrimSpace(part))
+			if cleaned != "" {
+				normalized = append(normalized, cleaned)
+			}
+		}
+	}
+	if len(normalized) == 0 {
+		return []RequestEntry{}
+	}
+
+	filtered := make([]RequestEntry, 0, len(entries))
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry.Path)
+		if !hasHTTPScheme(trimmed) {
+			filtered = append(filtered, entry)
+			continue
+		}
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			continue
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if hostMatchesFilter(host, normalized) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+// hostMatchesFilter reports whether host matches any exact hostname or "*.domain" wildcard pattern in patterns.
+func hostMatchesFilter(host string, patterns []string) bool {
+	if host == "" {
+		return false
+	}
+	for _, pat := range patterns {
+		if host == pat {
+			return true
+		}
+		if strings.HasPrefix(pat, "*.") {
+			suffix := pat[1:] // ".example.com"
+			if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sanitizeRequestHeaders strips configured auth/custom headers and recorded Diverge routing headers/cookies, then injects preview routing headers when routingVal is set.
+func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, stripAuth bool, stripHeaders []string) {
+	if stripAuth {
+		if req.URL != nil {
+			req.URL.User = nil
+		}
+		req.Header.Del("Authorization")
+		req.Header.Del("Proxy-Authorization")
+		req.Header.Del("Cookie")
+		req.Header.Del("X-Api-Key")
+	}
+	for _, h := range stripHeaders {
+		if trimmed := strings.TrimSpace(h); trimmed != "" {
+			req.Header.Del(trimmed)
+		}
+	}
+
+	// Always strip any recorded routing headers, diverge_env sticky-routing cookies, or diverge.env baggage items first
+	// so baseline requests never route to preview and preview requests route strictly to routingVal.
+	req.Header.Del(DefaultHeaderKey)
+	if routingKey != "" {
+		req.Header.Del(routingKey)
+	}
+	stripDivergeBaggage(&req.Header)
+	stripDivergeCookie(&req.Header)
+
+	if routingKey != "" && routingVal != "" {
+		req.Header.Set(routingKey, routingVal)
+		baggageItem := fmt.Sprintf("diverge.env=%s", routingVal)
+		if existing := req.Header.Get("baggage"); existing != "" {
+			req.Header.Set("baggage", existing+","+baggageItem)
+		} else {
+			req.Header.Set("baggage", baggageItem)
+		}
+	}
+}
+
 // executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string) (int, string, string, []byte, time.Duration, error) {
-	reqCtx := ctx
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string) (int, string, string, []byte, time.Duration, error) {
+	policy := requestSanitizePolicy{
+		routingKey:   routingKey,
+		routingVal:   routingVal,
+		stripAuth:    stripAuth,
+		stripHeaders: stripHeaders,
+	}
+	reqCtx := context.WithValue(ctx, sanitizePolicyContextKey{}, policy)
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		reqCtx, cancel = context.WithTimeout(reqCtx, timeout)
 		defer cancel()
 	}
 
@@ -484,22 +626,7 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 		req.Header.Set(k, v)
 	}
 
-	// Always strip any recorded routing headers or diverge.env baggage items first so baseline requests never route to preview
-	req.Header.Del(DefaultHeaderKey)
-	if routingKey != "" {
-		req.Header.Del(routingKey)
-	}
-	stripDivergeBaggage(&req.Header)
-
-	if routingKey != "" && routingVal != "" {
-		req.Header.Set(routingKey, routingVal)
-		baggageItem := fmt.Sprintf("diverge.env=%s", routingVal)
-		if existing := req.Header.Get("baggage"); existing != "" {
-			req.Header.Set("baggage", existing+","+baggageItem)
-		} else {
-			req.Header.Set("baggage", baggageItem)
-		}
-	}
+	sanitizeRequestHeaders(req, routingKey, routingVal, stripAuth, stripHeaders)
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -544,6 +671,37 @@ func stripDivergeBaggage(hdr *http.Header) {
 		hdr.Del("baggage")
 	} else {
 		hdr.Set("baggage", strings.Join(kept, ","))
+	}
+}
+
+// stripDivergeCookie removes any recorded diverge_env=<value> sticky-routing cookies from Cookie headers.
+func stripDivergeCookie(hdr *http.Header) {
+	vals := hdr.Values("Cookie")
+	if len(vals) == 0 {
+		return
+	}
+	var newVals []string
+	for _, rawVal := range vals {
+		parts := strings.Split(rawVal, ";")
+		kept := make([]string, 0, len(parts))
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(trimmed, "=")
+			if strings.TrimSpace(name) == "diverge_env" {
+				continue
+			}
+			kept = append(kept, trimmed)
+		}
+		if len(kept) > 0 {
+			newVals = append(newVals, strings.Join(kept, "; "))
+		}
+	}
+	hdr.Del("Cookie")
+	for _, v := range newVals {
+		hdr.Add("Cookie", v)
 	}
 }
 

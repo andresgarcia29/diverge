@@ -28,6 +28,16 @@ INPUT_VERIFY="${INPUT_VERIFY:-false}"
 INPUT_VERIFY_PATH="${INPUT_VERIFY_PATH:-/}"
 INPUT_VERIFY_COMPARE_BASELINE="${INPUT_VERIFY_COMPARE_BASELINE:-false}"
 INPUT_VERIFY_MAX_LATENCY="${INPUT_VERIFY_MAX_LATENCY:-5s}"
+INPUT_REPLAY="${INPUT_REPLAY:-false}"
+INPUT_REPLAY_FROM="${INPUT_REPLAY_FROM:-}"
+INPUT_REPLAY_MAX_LATENCY="${INPUT_REPLAY_MAX_LATENCY:-}"
+INPUT_REPLAY_COMPARE_VALUES="${INPUT_REPLAY_COMPARE_VALUES:-false}"
+INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS="${INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS:-false}"
+INPUT_REPLAY_IGNORE_FIELDS="${INPUT_REPLAY_IGNORE_FIELDS:-}"
+INPUT_REPLAY_FILTER_HOSTS="${INPUT_REPLAY_FILTER_HOSTS:-}"
+INPUT_REPLAY_STRIP_AUTH="${INPUT_REPLAY_STRIP_AUTH:-false}"
+INPUT_REPLAY_PROTO_DESCRIPTOR="${INPUT_REPLAY_PROTO_DESCRIPTOR:-}"
+INPUT_REPLAY_PROTO_MESSAGE="${INPUT_REPLAY_PROTO_MESSAGE:-}"
 INPUT_DRY_RUN="${INPUT_DRY_RUN:-false}"
 INPUT_KUBECONFIG="${INPUT_KUBECONFIG:-}"
 
@@ -116,6 +126,59 @@ run_verify() {
   fi
   verify_args+=(--github-summary)
   "$DIVERGE_BIN" "${verify_args[@]}"
+}
+
+run_replay() {
+  local preview_name="$1"
+  if [[ -z "${INPUT_REPLAY_FROM:-}" ]]; then
+    echo "Error: INPUT_REPLAY_FROM (replay-from) is required when running diverge replay" >&2
+    exit 1
+  fi
+  local header_val="${INPUT_HEADER_VALUE:-$preview_name}"
+  local -a replay_args=(
+    replay "$preview_name"
+    --from "$INPUT_REPLAY_FROM"
+    -n "$NAMESPACE"
+    --header-key "$INPUT_HEADER_KEY"
+    --header-value "$header_val"
+  )
+  if [[ -n "${INPUT_BASE_URL:-}" ]]; then
+    replay_args+=(--base-url "$INPUT_BASE_URL")
+  fi
+  if [[ -n "${INPUT_REPLAY_MAX_LATENCY:-}" ]]; then
+    replay_args+=(--max-latency "$INPUT_REPLAY_MAX_LATENCY")
+  fi
+  if [[ "${INPUT_REPLAY_COMPARE_VALUES:-false}" == "true" ]]; then
+    replay_args+=(--compare-values)
+  fi
+  if [[ "${INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS:-false}" == "true" ]]; then
+    replay_args+=(--fail-on-extra-fields)
+  fi
+  if [[ "${INPUT_REPLAY_STRIP_AUTH:-false}" == "true" ]]; then
+    replay_args+=(--strip-auth)
+  fi
+  if [[ -n "${INPUT_REPLAY_PROTO_DESCRIPTOR:-}" ]]; then
+    replay_args+=(--proto-descriptor "$INPUT_REPLAY_PROTO_DESCRIPTOR")
+  fi
+  if [[ -n "${INPUT_REPLAY_PROTO_MESSAGE:-}" ]]; then
+    replay_args+=(--proto-message "$INPUT_REPLAY_PROTO_MESSAGE")
+  fi
+  if [[ -n "${INPUT_REPLAY_IGNORE_FIELDS:-}" ]]; then
+    while IFS= read -r fld; do
+      fld="$(printf '%s' "$fld" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      [[ -z "$fld" ]] && continue
+      replay_args+=(--ignore-field "$fld")
+    done < <(printf '%s\n' "$INPUT_REPLAY_IGNORE_FIELDS" | tr ',' '\n')
+  fi
+  if [[ -n "${INPUT_REPLAY_FILTER_HOSTS:-}" ]]; then
+    while IFS= read -r hst; do
+      hst="$(printf '%s' "$hst" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      [[ -z "$hst" ]] && continue
+      replay_args+=(--filter-host "$hst")
+    done < <(printf '%s\n' "$INPUT_REPLAY_FILTER_HOSTS" | tr ',' '\n')
+  fi
+  replay_args+=(--github-summary)
+  "$DIVERGE_BIN" "${replay_args[@]}"
 }
 
 case "$INPUT_ACTION" in
@@ -216,11 +279,24 @@ case "$INPUT_ACTION" in
 
     "$DIVERGE_BIN" "${CREATE_ARGS[@]}"
 
-    if [[ ( "$INPUT_WAIT" == "true" || "$INPUT_VERIFY" == "true" ) && "$INPUT_DRY_RUN" != "true" ]]; then
+    if [[ ( "$INPUT_WAIT" == "true" || "$INPUT_VERIFY" == "true" || "$INPUT_REPLAY" == "true" ) && "$INPUT_DRY_RUN" != "true" ]]; then
       if ! "$KUBECTL_BIN" wait -n "$INPUT_NAMESPACE" --for=condition=Ready "previewgroup/$PREVIEW_NAME" --timeout="$INPUT_WAIT_TIMEOUT"; then
         "$DIVERGE_BIN" doctor "$PREVIEW_NAME" -n "$NAMESPACE" || true
         exit 1
       fi
+      for _ in $(seq 1 15); do
+        GEN_PAIR="$("$KUBECTL_BIN" get previewgroup "$PREVIEW_NAME" -n "$INPUT_NAMESPACE" -o jsonpath='{.metadata.generation}:{.status.conditions[?(@.type=="Ready")].observedGeneration}' 2>/dev/null || true)"
+        META_GEN="${GEN_PAIR%%:*}"
+        OBS_GEN="${GEN_PAIR#*:}"
+        if [[ ! "$META_GEN" =~ ^[0-9]+$ ]] || [[ ! "$OBS_GEN" =~ ^[0-9]+$ ]] || [[ "$OBS_GEN" -ge "$META_GEN" ]]; then
+          break
+        fi
+        sleep 2
+        if ! "$KUBECTL_BIN" wait -n "$INPUT_NAMESPACE" --for=condition=Ready "previewgroup/$PREVIEW_NAME" --timeout="$INPUT_WAIT_TIMEOUT"; then
+          "$DIVERGE_BIN" doctor "$PREVIEW_NAME" -n "$NAMESPACE" || true
+          exit 1
+        fi
+      done
     fi
 
     PREVIEW_URL=""
@@ -253,11 +329,21 @@ case "$INPUT_ACTION" in
     if [[ "$INPUT_VERIFY" == "true" && "$INPUT_DRY_RUN" != "true" ]]; then
       run_verify "$PREVIEW_NAME"
     fi
+
+    if [[ "$INPUT_REPLAY" == "true" && "$INPUT_DRY_RUN" != "true" ]]; then
+      run_replay "$PREVIEW_NAME"
+    fi
     ;;
 
   verify)
     PREVIEW_NAME="$(resolve_preview_name)"
     run_verify "$PREVIEW_NAME"
+    emit_output "preview-name" "$PREVIEW_NAME"
+    ;;
+
+  replay)
+    PREVIEW_NAME="$(resolve_preview_name)"
+    run_replay "$PREVIEW_NAME"
     emit_output "preview-name" "$PREVIEW_NAME"
     ;;
 
@@ -269,7 +355,7 @@ case "$INPUT_ACTION" in
     ;;
 
   *)
-    echo "Unsupported INPUT_ACTION: ${INPUT_ACTION} (expected validate, diff, deploy, verify, or teardown)" >&2
+    echo "Unsupported INPUT_ACTION: ${INPUT_ACTION} (expected validate, diff, deploy, verify, replay, or teardown)" >&2
     exit 1
     ;;
 esac

@@ -477,3 +477,44 @@ func TestResolveReplayRouting(t *testing.T) {
 		})
 	}
 }
+
+func TestReplayCmd_FilterHostAndStripAuthFlags(t *testing.T) {
+	var seenAuth, seenCustom string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenCustom = r.Header.Get("X-Internal-Secret")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "mixed-hosts.jsonl")
+	traceContent := `{"id":"keep","method":"GET","path":"/api/v1/orders","headers":{"Authorization":"Bearer tok","X-Internal-Secret":"s3cr3t"}}` + "\n" +
+		`{"id":"drop","method":"GET","path":"https://analytics.thirdparty.example/collect"}` + "\n"
+	require.NoError(t, os.WriteFile(tracePath, []byte(traceContent), 0o644))
+
+	root := NewRootCmd(&App{Namespace: "default"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{
+		"replay", "pr-42",
+		"--from", tracePath,
+		"--base-url", srv.URL,
+		"--header-value", "pr-42",
+		"--filter-host", "api.example.com",
+		"--strip-auth",
+		"--strip-header", "X-Internal-Secret",
+		"--json",
+	})
+	require.NoError(t, root.Execute())
+
+	var report replay.Report
+	require.NoError(t, json.Unmarshal(out.Bytes(), &report))
+	assert.True(t, report.Passed)
+	assert.Equal(t, 1, report.TotalRequests)
+	assert.Empty(t, seenAuth)
+	assert.Empty(t, seenCustom)
+}

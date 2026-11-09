@@ -45,6 +45,9 @@ var replaySchema = json.RawMessage(`{
 		"compare_values": {"type": "boolean", "description": "Compare exact scalar values in addition to JSON/Protobuf field types and wire schema"},
 		"fail_on_extra_fields": {"type": "boolean", "description": "Treat newly added JSON keys or Protobuf tags in preview as breaking"},
 		"ignore_fields": {"type": "array", "items": {"type": "string"}, "description": "Field names or paths to ignore during contract diffing"},
+		"filter_hosts": {"type": "array", "items": {"type": "string"}, "description": "Optional hostnames or wildcard patterns (e.g. *.example.com) to retain from multi-host traces"},
+		"strip_headers": {"type": "array", "items": {"type": "string"}, "description": "Optional request header names to strip before replaying"},
+		"strip_auth": {"type": "boolean", "description": "Strip Authorization, Proxy-Authorization, Cookie, and X-Api-Key headers before replaying"},
 		"proto_descriptor": {"type": "string", "description": "Optional path to a compiled Protobuf FileDescriptorSet (.binpb)"},
 		"proto_message": {"type": "string", "description": "Optional default fully-qualified Protobuf message type for response decoding"},
 		"max_latency_ms": {"type": "integer", "description": "Maximum acceptable preview response latency per request in milliseconds"}
@@ -62,6 +65,9 @@ type mcpReplayParams struct {
 	CompareValues     bool            `json:"compare_values"`
 	FailOnExtraFields bool            `json:"fail_on_extra_fields"`
 	IgnoreFields      []string        `json:"ignore_fields"`
+	FilterHosts       []string        `json:"filter_hosts"`
+	StripHeaders      []string        `json:"strip_headers"`
+	StripAuth         bool            `json:"strip_auth"`
 	ProtoDescriptor   string          `json:"proto_descriptor"`
 	ProtoMessage      string          `json:"proto_message"`
 	MaxLatencyMs      int64           `json:"max_latency_ms"`
@@ -71,7 +77,7 @@ type mcpReplayParams struct {
 func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.EnvironmentServiceClient) {
 	registry.Register(mcpruntime.ToolDefinition{
 		Name:        "diverge_replay",
-		Description: "Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic (.jsonl, .har, .json, or inline requests) against baseline and a preview environment. Compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags/descriptors. Executes requests against baseline and attempts preview only when baseline execution completes without error (including passing the 10 MiB response-size check, whereas baseline HTTP or gRPC status does not determine whether preview is attempted). Replay forwards recorded headers and bodies without sanitizing credentials or sensitive data and does not strip recorded diverge_env sticky-routing cookies—choose safe targets, filter state-changing requests, remove or replace captured credentials and sensitive data, remove diverge_env cookies from traces and inline requests, and verify that the baseline URL serves the baseline before replay.",
+		Description: "Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traffic (.jsonl, .har, .json, or inline requests) against baseline and a preview environment. Compares status code parity, p50/p95 latency, JSON structural schemas, and binary Protobuf wire tags/descriptors. Executes requests against baseline and attempts preview only when baseline execution completes without error (including passing the 10 MiB response-size check, whereas baseline HTTP or gRPC status does not determine whether preview is attempted). Automatically strips recorded diverge_env sticky-routing cookies, diverge.env baggage items, and routing headers from baseline requests; supports filter_hosts to retain only matching hostnames, strip_auth to remove Authorization/Proxy-Authorization/Cookie/X-Api-Key headers and URL userinfo, and strip_headers to remove custom headers before replay.",
 		InputSchema: replaySchema,
 	}, func(ctx context.Context, req mcpruntime.ToolRequest) (*mcpruntime.CallToolResult, error) {
 		var params mcpReplayParams
@@ -95,6 +101,13 @@ func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.
 			}
 		} else {
 			return errorToolResult(fmt.Errorf("either trace_file or requests is required")), nil
+		}
+
+		if len(params.FilterHosts) > 0 {
+			entries = replay.FilterEntriesByHost(entries, params.FilterHosts)
+			if len(entries) == 0 {
+				return errorToolResult(fmt.Errorf("no trace entries matched filter_hosts %v", params.FilterHosts)), nil
+			}
 		}
 
 		protoFiles, err := replay.LoadDescriptorFiles(params.ProtoDescriptor)
@@ -186,6 +199,9 @@ func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.
 			MaxLatency:         maxLatency,
 			FailOnStatusDiff:   true,
 			FailOnContractDiff: true,
+			FilterHosts:        params.FilterHosts,
+			StripHeaders:       params.StripHeaders,
+			StripAuth:          params.StripAuth,
 			DiffOptions: replay.DiffOptions{
 				CompareValues:     params.CompareValues,
 				FailOnExtraFields: params.FailOnExtraFields,

@@ -29,6 +29,9 @@ type replayOptions struct {
 	failOnStatusDiff   bool
 	failOnContractDiff bool
 	ignoreFields       []string
+	filterHosts        []string
+	stripHeaders       []string
+	stripAuth          bool
 	protoDescriptor    string
 	protoMessage       string
 	outputJSON         bool
@@ -69,6 +72,12 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 			if err != nil {
 				return err
 			}
+			if len(opts.filterHosts) > 0 {
+				entries = replay.FilterEntriesByHost(entries, opts.filterHosts)
+				if len(entries) == 0 {
+					return fmt.Errorf("no trace entries matched --filter-host %v", opts.filterHosts)
+				}
+			}
 
 			protoFiles, err := replay.LoadDescriptorFiles(opts.protoDescriptor)
 			if err != nil {
@@ -92,6 +101,9 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 				MaxLatency:         opts.maxLatency,
 				FailOnStatusDiff:   opts.failOnStatusDiff,
 				FailOnContractDiff: opts.failOnContractDiff,
+				FilterHosts:        opts.filterHosts,
+				StripHeaders:       opts.stripHeaders,
+				StripAuth:          opts.stripAuth,
 				DiffOptions: replay.DiffOptions{
 					CompareValues:     opts.compareValues,
 					FailOnExtraFields: opts.failOnExtraFields,
@@ -172,6 +184,9 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 	cmd.Flags().BoolVar(&opts.failOnStatusDiff, "fail-on-status-diff", true, "Fail if baseline and preview HTTP status codes differ")
 	cmd.Flags().BoolVar(&opts.failOnContractDiff, "fail-on-contract-diff", true, "Fail if breaking JSON or Protobuf contract diffs are detected")
 	cmd.Flags().StringSliceVar(&opts.ignoreFields, "ignore-field", nil, "Field name or path to ignore during diffing (repeatable, e.g. --ignore-field request_id)")
+	cmd.Flags().StringSliceVar(&opts.filterHosts, "filter-host", nil, "Retain only trace entries matching the given hostname or wildcard pattern (repeatable, e.g. --filter-host api.example.com --filter-host '*.example.com')")
+	cmd.Flags().StringSliceVar(&opts.stripHeaders, "strip-header", nil, "Request header name to strip before replaying (repeatable, e.g. --strip-header X-Internal-Token)")
+	cmd.Flags().BoolVar(&opts.stripAuth, "strip-auth", false, "Strip Authorization, Proxy-Authorization, Cookie, and X-Api-Key headers before replaying")
 	cmd.Flags().StringVar(&opts.protoDescriptor, "proto-descriptor", "", "Optional path to compiled Protobuf FileDescriptorSet (.binpb) for schema-aware decoding")
 	cmd.Flags().StringVar(&opts.protoMessage, "proto-message", "", "Default fully-qualified Protobuf message type for response decoding")
 	cmd.Flags().BoolVar(&opts.outputJSON, "json", false, "Output replay report as JSON")

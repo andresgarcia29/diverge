@@ -58,9 +58,9 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
-  # Argo CD
+  # Argo CD & Argo Rollouts
   - apiGroups: ["argoproj.io"]
-    resources: [applicationsets, applications]
+    resources: [applicationsets, applications, rollouts, analysistemplates]
     verbs: [get, list, watch, create, update, patch, delete]
   # KEDA HTTP Add-on
   - apiGroups: ["http.keda.sh"]

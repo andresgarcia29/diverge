@@ -358,13 +358,15 @@ func TestGitLabWebhookDeletesOnMerge(t *testing.T) {
 	}
 }
 
+// TestGitLabWebhookNoteSlashCommand verifies that an authorized GitLab Note Hook MR comment dispatches a slash command.
 func TestGitLabWebhookNoteSlashCommand(t *testing.T) {
 	fakeK8s := newTestClient()
 
 	handler := &GitLabWebhookHandler{
-		Client:    fakeK8s,
-		Config:    WebhookConfig{SecretToken: "secret"},
-		DefaultNS: "preview",
+		Client:       fakeK8s,
+		Config:       WebhookConfig{SecretToken: "secret"},
+		AllowedUsers: []string{"10"},
+		DefaultNS:    "preview",
 	}
 
 	body := `{
@@ -464,13 +466,14 @@ func TestGitLabWebhookTraceparentPropagation(t *testing.T) {
 	}
 }
 
+// TestGitLabWebhookNoteAuthorization verifies that GitLab Note Hook slash commands enforce numeric user ID authorization and fail closed when AllowedUsers is empty.
 func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 	fakeK8s := newTestClient()
 
 	handler := &GitLabWebhookHandler{
 		Client:       fakeK8s,
 		Config:       WebhookConfig{SecretToken: "secret"},
-		AllowedUsers: []string{"trusted-dev"},
+		AllowedUsers: []string{"1"},
 		DefaultNS:    "preview",
 	}
 
@@ -492,10 +495,10 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 			}`,
 		},
 		{
-			name: "unauthorized user not in AllowedUsers is ignored",
+			name: "unauthorized user ID not in AllowedUsers is ignored even with matching username",
 			body: `{
 				"object_kind": "note",
-				"user": {"id": 2, "username": "external-user"},
+				"user": {"id": 2, "username": "trusted-dev"},
 				"object_attributes": {
 					"note": "/diverge fix should not run for untrusted user",
 					"noteable_type": "MergeRequest"
@@ -528,8 +531,41 @@ func TestGitLabWebhookNoteAuthorization(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("empty AllowedUsers fails closed", func(t *testing.T) {
+		commenter := &testMockCommenter{}
+		unconfiguredHandler := &GitLabWebhookHandler{
+			Client:    fakeK8s,
+			Config:    WebhookConfig{SecretToken: "secret"},
+			Commenter: commenter,
+			DefaultNS: "preview",
+		}
+		body := `{
+			"object_kind": "note",
+			"user": {"id": 1, "username": "trusted-dev"},
+			"object_attributes": {
+				"note": "/diverge replay /healthz",
+				"noteable_type": "MergeRequest"
+			},
+			"merge_request": {"iid": 88, "source_branch": "feat/db-pool"},
+			"project": {"path_with_namespace": "team/payments-api"}
+		}`
+		req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+		req.Header.Set("X-Gitlab-Token", "secret")
+		req.Header.Set("X-Gitlab-Event", "Note Hook")
+
+		rr := httptest.NewRecorder()
+		unconfiguredHandler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Expected 200, got %d", rr.Code)
+		}
+		if len(commenter.postedComments) != 0 {
+			t.Fatalf("Expected 0 comments posted, got %d", len(commenter.postedComments))
+		}
+	})
 }
 
+// TestGitLabWebhookNoteWithCommenterFeedback verifies that an authorized GitLab Note Hook slash command posts feedback via the configured Commenter.
 func TestGitLabWebhookNoteWithCommenterFeedback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = divergeiov1alpha1.AddToScheme(scheme)
@@ -540,7 +576,7 @@ func TestGitLabWebhookNoteWithCommenterFeedback(t *testing.T) {
 		Client:       fakeK8s,
 		Config:       WebhookConfig{SecretToken: "secret"},
 		Commenter:    commenter,
-		AllowedUsers: []string{"developer"},
+		AllowedUsers: []string{"1"},
 		DefaultNS:    "preview",
 	}
 

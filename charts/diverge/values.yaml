@@ -46,6 +46,11 @@ prometheus:
 webhook:
   port: 9443
   secretName: diverge-webhook-token
+  # -- Comma-separated list of numeric GitLab user IDs authorized to execute /diverge MR slash commands.
+  # Upgrade warning: Upgrading with this empty default disables GitLab MR slash-command execution
+  # (fail-closed) and returns HTTP 200 without posting feedback. Configure authorized numeric
+  # GitLab user IDs before upgrading if you rely on GitLab MR slash commands.
+  gitlabAllowedUsers: ""
   validatingWebhook:
     enabled: false
     failurePolicy: Fail

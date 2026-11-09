@@ -34,7 +34,10 @@ services:
 
 ### Turnkey Composite Action (Recommended)
 
-Use the official `divergedev/diverge@v0.18.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), and expose routing headers to Playwright or Cypress:
+Use the official `divergedev/diverge@v0.21.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), replay recorded traffic traces (`replay: "true"` with `replay-from` set to a `.jsonl` or `.har` trace file), and expose routing headers to Playwright or Cypress:
+
+> [!WARNING]
+> **Sanitize replay traces before replaying in PR workflows**: Remove live credentials and sensitive request or response bodies from `.jsonl` / `.har` trace files before replaying them in workflows that execute untrusted PR code. Setting `replay-strip-auth: "true"` strips only the recorded `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers and does not sanitize request/response bodies, URL query parameters, or other custom headers.
 
 ```yaml
 name: Preview Environment
@@ -54,7 +57,7 @@ jobs:
 
       - name: Deploy Diverge Delta Preview
         id: diverge
-        uses: divergedev/diverge@v0.18.0
+        uses: divergedev/diverge@v0.21.0
         with:
           action: deploy
           kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
@@ -77,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: divergedev/diverge@v0.18.0
+      - uses: divergedev/diverge@v0.21.0
         with:
           action: teardown
           kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
@@ -87,7 +90,7 @@ jobs:
 
 | Input | Default | Description |
 | :--- | :--- | :--- |
-| `action` | `deploy` | `validate`, `diff`, `deploy`, `verify`, or `teardown` |
+| `action` | `deploy` | `validate`, `diff`, `deploy`, `verify`, `replay`, or `teardown` |
 | `kubeconfig` | `""` | Raw or base64-encoded kubeconfig for target cluster |
 | `image-registry` | `""` | Registry prefix for changed services (e.g. `ghcr.io/acme`) |
 | `image-tag` | `""` | Image tag for changed services (when omitted, defaults to resolved `preview-name`, e.g. `pr-<number>` or branch slug) |
@@ -99,6 +102,16 @@ jobs:
 | `verify-path` | `/` | HTTP path to probe during `verify` |
 | `verify-compare-baseline` | `false` | Compare preview HTTP status against baseline during `verify` |
 | `verify-max-latency` | `5s` | Maximum allowed HTTP latency during `verify` |
+| `replay` | `false` | Run `diverge replay` after deploy and write contract diff scorecard to `$GITHUB_STEP_SUMMARY` |
+| `replay-from` | `""` | Path to HAR (`.har`) or JSONL (`.jsonl`) trace file for `diverge replay` |
+| `replay-max-latency` | `""` | Maximum allowed preview latency per replayed request (e.g. `500ms`, `2s`) |
+| `replay-compare-values` | `false` | Compare exact scalar values during replay instead of structural types |
+| `replay-fail-on-extra-fields` | `false` | Fail replay when preview adds new fields not present in baseline |
+| `replay-ignore-fields` | `""` | Comma-separated field paths or Protobuf field numbers to ignore during replay |
+| `replay-filter-hosts` | `""` | Comma-separated host patterns to include from HAR/JSONL traces during replay |
+| `replay-strip-auth` | `false` | Strip recorded `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers during replay |
+| `replay-proto-descriptor` | `""` | Optional compiled Protobuf `FileDescriptorSet` (`.binpb`) for named-field Protobuf diffs |
+| `replay-proto-message` | `""` | Fully-qualified Protobuf response message name when using `replay-proto-descriptor` |
 
 | Output | Example | Description |
 | :--- | :--- | :--- |
@@ -143,14 +156,15 @@ If you prefer calling the `diverge` CLI directly without the composite action:
 
 ### Turnkey GitLab CI/CD Component (Recommended)
 
-Include the official component (`templates/preview/template.yml`). It automatically runs `diverge diff` when `diverge_services` is omitted and exports dotenv-safe variables in `preview.env` (`DIVERGE_PREVIEW_NAME`, `DIVERGE_SKIPPED`, `DIVERGE_ROUTING_HEADER_B64`, `DIVERGE_PREVIEW_URL`) to downstream jobs:
+Include the official component (`templates/preview/template.yml`). It automatically runs `diverge diff` when `diverge_services` is omitted, optionally runs `diverge replay` when `diverge_replay_from` is set, and exports dotenv-safe variables in `preview.env` (`DIVERGE_PREVIEW_NAME`, `DIVERGE_SKIPPED`, `DIVERGE_ROUTING_HEADER_B64`, `DIVERGE_PREVIEW_URL`) to downstream jobs:
 
 ```yaml
 include:
-  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.18.0
+  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.21.0
     inputs:
       diverge_registry: "$CI_REGISTRY_IMAGE"
       diverge_base_url: "https://staging.example.com"
+      diverge_replay_from: "./traces/checkout.jsonl"
 
 e2e_preview:
   stage: test
@@ -163,6 +177,9 @@ e2e_preview:
     - if [ "${DIVERGE_SKIPPED:-false}" = "true" ]; then exit 0; fi
     - EXTRA_HTTP_HEADERS="$(echo "$DIVERGE_ROUTING_HEADER_B64" | base64 -d)" npx playwright test
 ```
+
+> [!WARNING]
+> **Sanitize replay traces before committing or replaying in GitLab CI**: The GitLab CI component forwards recorded headers and bodies by default and does not expose a credential-stripping input. Always remove or redact live credentials (such as session cookies, `Authorization` tokens, or API keys) and sensitive request bodies from `.jsonl` / `.har` trace files before using `diverge_replay_from`.
 
 ### Manual CLI Pipeline
 
@@ -231,13 +248,15 @@ In addition to CI-driven preview deployments, Diverge's webhook handlers execute
 
 ### Webhook Event Subscriptions
 - **GitHub**: Subscribe your webhook (`/github-webhook`) to **Issue comments** (`issue_comment`) in addition to **Pull requests** (`pull_request`). For security, only comments on Pull Requests from repository `OWNER`, `MEMBER`, or `COLLABORATOR` accounts are executed.
-- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`.
+- **GitLab**: Enable **Comments** (`Note Hook` on Merge Requests) in addition to **Merge request events** on `/gitlab-webhook`, and configure authorized numeric GitLab user IDs on the controller via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS` (comma-separated; when `AllowedUsers` is empty, MR slash commands fail closed and return HTTP 200 without feedback, while authenticated merge-request lifecycle events continue to create, update, or delete preview environments).
 
 ### PR / MR Slash Commands Reference
 
 | Slash Command | Target Resource(s) | Description |
 | :--- | :--- | :--- |
 | `/diverge preview` | `Environment` | Creates or reconciles an `Environment` (`pr-<num>` / `mr-<num>`) for the current PR/MR branch. |
+| `/diverge verify [path]` | `Environment`, `PreviewGroup` | Runs Kubernetes workload `doctor` diagnostics and routed HTTP readiness + baseline parity probes against the PR/MR preview environment (defaults to `/` when `[path]` is omitted) and replies with a Markdown scorecard. |
+| `/diverge replay [path ...]` | `Environment`, `PreviewGroup` | Replays inline whitespace-separated `GET` probe paths against baseline and the PR/MR preview environment (defaults to `/` when omitted), diffing status codes, latency, and JSON/Protobuf response contracts, and replies with a Markdown scorecard. Subdomain-routed previews emit a warning and skip probes/scorecards; use the CLI (`diverge replay <env> --from <trace> --base-url <baseline-url> --preview-url <preview-url>`) for subdomain-routed environments. |
 | `/diverge fix <objective>` | `AgentTask` | Spawns or updates an autonomous `AgentTask` (and linked preview environment) targeting the PR/MR branch with `<objective>`. |
 | `/diverge extend-ttl [duration]` | `Environment`, `PreviewGroup` | Extends `spec.lifecycle.ttl` for all preview environments and preview groups matching the PR/MR (defaults to `24h` if `[duration]` is omitted, e.g., `/diverge extend-ttl 48h`). |
 | `/diverge teardown` | `Environment`, `PreviewGroup` | Immediately deletes all `Environment` and `PreviewGroup` resources associated with the PR/MR. |
@@ -248,6 +267,8 @@ In addition to CI-driven preview deployments, Diverge's webhook handlers execute
 
 ```text
 /diverge preview
+/diverge verify /healthz
+/diverge replay /api/v1/catalog /api/v1/healthz
 /diverge fix Resolve the flaky checkout integration test and update currency rounding
 /diverge extend-ttl 48h
 /diverge pause

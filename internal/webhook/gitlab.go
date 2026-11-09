@@ -82,12 +82,11 @@ type GitLabNotePayload struct {
 	} `json:"project"`
 }
 
+// isAuthorizedGitLabCommenter returns true if the GitLab Note Hook commenter has a
+// positive numeric user ID, satisfies any reported AuthorAssociation role check, and
+// matches an immutable numeric user ID in the fail-closed AllowedUsers allowlist.
 func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePayload) bool {
-	if payload == nil {
-		return false
-	}
-	username := strings.TrimSpace(payload.User.Username)
-	if username == "" && payload.User.ID <= 0 {
+	if payload == nil || payload.User.ID <= 0 {
 		return false
 	}
 	if assoc := strings.ToUpper(strings.TrimSpace(payload.ObjectAttributes.AuthorAssociation)); assoc != "" {
@@ -97,15 +96,16 @@ func (h *GitLabWebhookHandler) isAuthorizedGitLabCommenter(payload *GitLabNotePa
 			return false
 		}
 	}
-	if len(h.AllowedUsers) > 0 {
-		for _, allowed := range h.AllowedUsers {
-			if strings.EqualFold(strings.TrimSpace(allowed), username) {
-				return true
-			}
-		}
+	if len(h.AllowedUsers) == 0 {
 		return false
 	}
-	return true
+	userID := strconv.Itoa(payload.User.ID)
+	for _, allowed := range h.AllowedUsers {
+		if strings.TrimSpace(allowed) == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *GitLabWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +187,7 @@ func (h *GitLabWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleNoteEvent processes GitLab Note Hook webhook requests for Merge Request slash commands.
 func (h *GitLabWebhookHandler) handleNoteEvent(ctx context.Context, w http.ResponseWriter, bodyBytes []byte) {
 	logger := log.FromContext(ctx).WithName("gitlab-webhook")
 
@@ -203,7 +204,7 @@ func (h *GitLabWebhookHandler) handleNoteEvent(ctx context.Context, w http.Respo
 	}
 
 	if !h.isAuthorizedGitLabCommenter(&payload) {
-		logger.Info("Ignoring slash command from unauthorized GitLab commenter", "username", payload.User.Username)
+		logger.Info("Ignoring slash command from unauthorized GitLab commenter", "userID", payload.User.ID, "username", payload.User.Username)
 		w.WriteHeader(http.StatusOK)
 		return
 	}

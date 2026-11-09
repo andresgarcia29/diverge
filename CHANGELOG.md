@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.21.0] - 2026-11-08
+
+### 🚀 Highlights & New Features
+
+#### 🎯 Argo Rollouts Progressive Delivery Deployer (`--deploy-provider=argo-rollouts` / `argorollouts`)
+- **Native `argoproj.io/v1alpha1` `Rollout` Deployer (`internal/deployer/argorollouts.go`, `internal/deployer/keda.go`, `cmd/controller/main.go`, `charts/diverge/`) (#329)**: Added `ArgoRolloutsDeployer` (`--deploy-provider=argo-rollouts` / `argorollouts`) to provision unstructured `argoproj.io/v1alpha1` `Rollout` resources alongside preview `Service`s (`<env>-<service>`), `ConfigMap`s, and `Secret`s using Server-Side Apply.
+- **Background Canary `AnalysisTemplate` & KEDA `Rollout` ScaleTargetRef (#329)**: Supports `divergedev.com/rollout-analysis-template: <template-name>` (and automatic template generation via `divergedev.com/rollout-analysis: "true"`) to attach background canary `AnalysisTemplate` verification (`diverge verify` or `diverge replay`), maps `Rollout` `Paused` (`CanaryPause` / `AnalysisRun`) and `Degraded` phases into `DeploymentStatus`, and automatically targets `argoproj.io/v1alpha1` `Rollout` in `KEDAHTTPScaledObjectDeployer` when wrapping `ArgoRolloutsDeployer`.
+
+#### 🛡️ Replay Trace Sanitization, Host Filtering & Property-Based Testing
+- **Trace Host Filtering & Credential Sanitization (`pkg/replay/runner.go`, `internal/cli/replay.go`, `internal/cli/mcp_replay.go`, `internal/cli/mcp_tools.go`) (#329)**: Added `--filter-host` (exact and `*.domain` wildcard matching), `--strip-header`, and `--strip-auth` (`Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key`) to `diverge replay` and `diverge_replay`, plus automatic removal of `diverge_env` sticky-routing cookies from both baseline and preview requests so multi-cookie headers preserve non-routing cookies without contaminating baseline responses.
+- **Property-Based Testing (`pkg/replay/property_test.go`) (#329)**: Added `pgregory.net/rapid` property-based tests verifying `ComparePayloads`, `stripDivergeCookie`, `stripDivergeBaggage`, and `percentileInt64` invariants.
+
+#### ⚙️ First-Class `diverge replay` in GitHub Actions & GitLab CI Component
+- **Composite GitHub Action & GitLab CI Replay Support (`action.yml`, `scripts/ci-preview.sh`, `ci/gitlab/.gitlab-ci-component.yml`, `templates/preview/template.yml`) (#329)**: Added `action: replay` and post-deploy `replay: "true"` inputs (`replay-from`, `replay-max-latency`, `replay-compare-values`, `replay-fail-on-extra-fields`, `replay-ignore-fields`, `replay-filter-hosts`, `replay-strip-auth`, `replay-proto-descriptor`, `replay-proto-message`) to the GitHub Action and `diverge_replay_from` to the GitLab CI component.
+
+#### 💬 Interactive `/diverge verify` & `/diverge replay` PR/MR Slash Commands
+- **PR/MR Verification & Replay Slash Commands (`internal/webhook/commands.go`) (#329)**: Added `/diverge verify [path]` and `/diverge replay [path ...]` slash commands for GitHub Pull Requests and GitLab Merge Requests, running Kubernetes workload `doctor` diagnostics, routed HTTP readiness checks, and baseline-vs-preview JSON/Protobuf contract replay directly from PR/MR comments and posting a Markdown scorecard reply.
+- **Upgrade Note — Fail-Closed GitLab Slash-Command Authorization (`internal/webhook/gitlab.go`, `cmd/controller/main.go`, `charts/diverge/`) (#330)**: GitLab `Note Hook` MR slash commands now require an explicit allowlist of immutable numeric GitLab user IDs configured via `webhook.gitlabAllowedUsers` in the Helm chart, `--gitlab-allowed-users`, or `DIVERGE_GITLAB_ALLOWED_USERS`. Upgrading with the empty default disables GitLab MR slash-command execution (returning HTTP 200 without feedback); configure authorized numeric GitLab user IDs before upgrading.
+
+---
+
 ## [v0.20.0] - 2026-11-05
 
 ### 🚀 Highlights & New Features

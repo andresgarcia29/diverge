@@ -43,6 +43,8 @@ type Config struct {
 	FilterHosts        []string
 	StripHeaders       []string
 	StripAuth          bool
+	RedactQueryParams  []string
+	RedactBodyFields   []string
 	DiffOptions        DiffOptions
 	HTTPClient         *http.Client
 }
@@ -198,10 +200,11 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 }
 
 type requestSanitizePolicy struct {
-	routingKey   string
-	routingVal   string
-	stripAuth    bool
-	stripHeaders []string
+	routingKey        string
+	routingVal        string
+	stripAuth         bool
+	stripHeaders      []string
+	redactQueryParams []string
 }
 
 type sanitizePolicyContextKey struct{}
@@ -210,11 +213,12 @@ type sanitizingRoundTripper struct {
 	base http.RoundTripper
 }
 
-// RoundTrip sanitizes outbound request headers and cookies (including any cookies injected by an http.CookieJar) before delegating to the underlying transport.
+// RoundTrip sanitizes outbound request headers, query parameters, and cookies (including any cookies injected by an http.CookieJar) before delegating to the underlying transport.
 func (s *sanitizingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
 		cloned := req.Clone(req.Context())
 		sanitizeRequestHeaders(cloned, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
+		sanitizeURLObject(cloned.URL, policy.stripAuth, policy.redactQueryParams)
 		req = cloned
 	}
 	return s.base.RoundTrip(req)
@@ -314,6 +318,7 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 		}
 		if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
 			sanitizeRequestHeaders(req, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
+			sanitizeURLObject(req.URL, policy.stripAuth, policy.redactQueryParams)
 		}
 		if origRedirect != nil {
 			return origRedirect(req, via)
@@ -329,11 +334,12 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 
 // replayEntry executes a single trace entry against baseline and preview endpoints and compares their responses.
 func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int, entry RequestEntry, baseURL, previewBaseURL string) EntryResult {
+	sanitizedEntryPath := SanitizeURLString(entry.Path, r.Config.StripAuth, r.Config.RedactQueryParams)
 	res := EntryResult{
 		Index:  index,
 		ID:     entry.ID,
 		Method: entry.Method,
-		Path:   entry.Path,
+		Path:   sanitizedEntryPath,
 		Passed: true,
 	}
 
@@ -343,21 +349,26 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		res.FailureReasons = append(res.FailureReasons, err.Error())
 		return res
 	}
+	if len(r.Config.RedactBodyFields) > 0 && len(payload) > 0 {
+		if redacted, ok := RedactJSONBodyFields(payload, r.Config.RedactBodyFields); ok {
+			payload = redacted
+		}
+	}
 
-	resolvedBaseURL, err := ResolveEntryURL(baseURL, entry.Path)
+	resolvedBaseURL, err := ResolveEntryURL(baseURL, sanitizedEntryPath)
 	if err != nil {
 		res.Passed = false
 		res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("resolve baseline URL: %v", err))
 		return res
 	}
-	resolvedPrevURL, err := ResolveEntryURL(previewBaseURL, entry.Path)
+	resolvedPrevURL, err := ResolveEntryURL(previewBaseURL, sanitizedEntryPath)
 	if err != nil {
 		res.Passed = false
 		res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("resolve preview URL: %v", err))
 		return res
 	}
 
-	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders)
+	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams)
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -366,7 +377,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders)
+	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -563,9 +574,7 @@ func hostMatchesFilter(host string, patterns []string) bool {
 // sanitizeRequestHeaders strips configured auth/custom headers and recorded Diverge routing headers/cookies, then injects preview routing headers when routingVal is set.
 func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, stripAuth bool, stripHeaders []string) {
 	if stripAuth {
-		if req.URL != nil {
-			req.URL.User = nil
-		}
+		sanitizeURLObject(req.URL, true, nil)
 		req.Header.Del("Authorization")
 		req.Header.Del("Proxy-Authorization")
 		req.Header.Del("Cookie")
@@ -598,12 +607,13 @@ func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, st
 }
 
 // executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string) (int, string, string, []byte, time.Duration, error) {
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string, redactQueryParams []string) (int, string, string, []byte, time.Duration, error) {
 	policy := requestSanitizePolicy{
-		routingKey:   routingKey,
-		routingVal:   routingVal,
-		stripAuth:    stripAuth,
-		stripHeaders: stripHeaders,
+		routingKey:        routingKey,
+		routingVal:        routingVal,
+		stripAuth:         stripAuth,
+		stripHeaders:      stripHeaders,
+		redactQueryParams: redactQueryParams,
 	}
 	reqCtx := context.WithValue(ctx, sanitizePolicyContextKey{}, policy)
 	var cancel context.CancelFunc
@@ -627,6 +637,7 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 	}
 
 	sanitizeRequestHeaders(req, routingKey, routingVal, stripAuth, stripHeaders)
+	sanitizeURLObject(req.URL, stripAuth, redactQueryParams)
 
 	start := time.Now()
 	resp, err := client.Do(req)

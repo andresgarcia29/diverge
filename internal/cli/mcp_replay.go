@@ -47,7 +47,9 @@ var replaySchema = json.RawMessage(`{
 		"ignore_fields": {"type": "array", "items": {"type": "string"}, "description": "Field names or paths to ignore during contract diffing"},
 		"filter_hosts": {"type": "array", "items": {"type": "string"}, "description": "Optional hostnames or wildcard patterns (e.g. *.example.com) to retain from multi-host traces"},
 		"strip_headers": {"type": "array", "items": {"type": "string"}, "description": "Optional request header names to strip before replaying"},
-		"strip_auth": {"type": "boolean", "description": "Strip Authorization, Proxy-Authorization, Cookie, and X-Api-Key headers before replaying"},
+		"strip_auth": {"type": "boolean", "description": "Strip Authorization, Proxy-Authorization, Cookie, X-Api-Key headers, userinfo, and auth query tokens before replaying"},
+		"redact_query_params": {"type": "array", "items": {"type": "string"}, "description": "Optional query parameter names to redact with [REDACTED] before replaying"},
+		"redact_body_fields": {"type": "array", "items": {"type": "string"}, "description": "Optional JSON request body field names or dot-paths to redact with [REDACTED] before replaying"},
 		"proto_descriptor": {"type": "string", "description": "Optional path to a compiled Protobuf FileDescriptorSet (.binpb)"},
 		"proto_message": {"type": "string", "description": "Optional default fully-qualified Protobuf message type for response decoding"},
 		"max_latency_ms": {"type": "integer", "description": "Maximum acceptable preview response latency per request in milliseconds"}
@@ -68,6 +70,8 @@ type mcpReplayParams struct {
 	FilterHosts       []string        `json:"filter_hosts"`
 	StripHeaders      []string        `json:"strip_headers"`
 	StripAuth         bool            `json:"strip_auth"`
+	RedactQueryParams []string        `json:"redact_query_params"`
+	RedactBodyFields  []string        `json:"redact_body_fields"`
 	ProtoDescriptor   string          `json:"proto_descriptor"`
 	ProtoMessage      string          `json:"proto_message"`
 	MaxLatencyMs      int64           `json:"max_latency_ms"`
@@ -202,6 +206,8 @@ func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.
 			FilterHosts:        params.FilterHosts,
 			StripHeaders:       params.StripHeaders,
 			StripAuth:          params.StripAuth,
+			RedactQueryParams:  params.RedactQueryParams,
+			RedactBodyFields:   params.RedactBodyFields,
 			DiffOptions: replay.DiffOptions{
 				CompareValues:     params.CompareValues,
 				FailOnExtraFields: params.FailOnExtraFields,

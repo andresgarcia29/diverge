@@ -36,8 +36,11 @@ INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS="${INPUT_REPLAY_FAIL_ON_EXTRA_FIELDS:-false}"
 INPUT_REPLAY_IGNORE_FIELDS="${INPUT_REPLAY_IGNORE_FIELDS:-}"
 INPUT_REPLAY_FILTER_HOSTS="${INPUT_REPLAY_FILTER_HOSTS:-}"
 INPUT_REPLAY_STRIP_AUTH="${INPUT_REPLAY_STRIP_AUTH:-false}"
+INPUT_REPLAY_REDACT_QUERY="${INPUT_REPLAY_REDACT_QUERY:-}"
+INPUT_REPLAY_REDACT_BODY_FIELDS="${INPUT_REPLAY_REDACT_BODY_FIELDS:-}"
 INPUT_REPLAY_PROTO_DESCRIPTOR="${INPUT_REPLAY_PROTO_DESCRIPTOR:-}"
 INPUT_REPLAY_PROTO_MESSAGE="${INPUT_REPLAY_PROTO_MESSAGE:-}"
+INPUT_AUTO_FIX="${INPUT_AUTO_FIX:-false}"
 INPUT_DRY_RUN="${INPUT_DRY_RUN:-false}"
 INPUT_KUBECONFIG="${INPUT_KUBECONFIG:-}"
 
@@ -124,6 +127,9 @@ run_verify() {
   if [[ "${INPUT_VERIFY_COMPARE_BASELINE:-false}" == "true" ]]; then
     verify_args+=(--compare-baseline)
   fi
+  if [[ "${INPUT_AUTO_FIX:-false}" == "true" ]]; then
+    verify_args+=(--auto-fix)
+  fi
   verify_args+=(--github-summary)
   "$DIVERGE_BIN" "${verify_args[@]}"
 }
@@ -176,6 +182,23 @@ run_replay() {
       [[ -z "$hst" ]] && continue
       replay_args+=(--filter-host "$hst")
     done < <(printf '%s\n' "$INPUT_REPLAY_FILTER_HOSTS" | tr ',' '\n')
+  fi
+  if [[ -n "${INPUT_REPLAY_REDACT_QUERY:-}" ]]; then
+    while IFS= read -r qparam; do
+      qparam="$(printf '%s' "$qparam" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      [[ -z "$qparam" ]] && continue
+      replay_args+=(--redact-query "$qparam")
+    done < <(printf '%s\n' "$INPUT_REPLAY_REDACT_QUERY" | tr ',' '\n')
+  fi
+  if [[ -n "${INPUT_REPLAY_REDACT_BODY_FIELDS:-}" ]]; then
+    while IFS= read -r bfld; do
+      bfld="$(printf '%s' "$bfld" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+      [[ -z "$bfld" ]] && continue
+      replay_args+=(--redact-body-field "$bfld")
+    done < <(printf '%s\n' "$INPUT_REPLAY_REDACT_BODY_FIELDS" | tr ',' '\n')
+  fi
+  if [[ "${INPUT_AUTO_FIX:-false}" == "true" ]]; then
+    replay_args+=(--auto-fix)
   fi
   replay_args+=(--github-summary)
   "$DIVERGE_BIN" "${replay_args[@]}"

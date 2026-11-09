@@ -231,3 +231,38 @@ func TestProperty_PercentileInt64Monotonic(t *testing.T) {
 		assert.True(t, p95 <= maxVal, "expected p95 (%d) <= maxVal (%d)", p95, maxVal)
 	})
 }
+
+// TestProperty_SanitizeURLAndJSONBodyNeverLeaksSensitiveValues verifies that SanitizeURLString and
+// RedactJSONBodyFields always replace targeted parameter/field values with RedactedPlaceholder and remain idempotent.
+func TestProperty_SanitizeURLAndJSONBodyNeverLeaksSensitiveValues(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		secretVal := "sec_" + rapid.StringMatching(`[a-zA-Z0-9]{8,16}`).Draw(t, "secretVal")
+		safeVal := "pub_" + rapid.StringMatching(`[a-zA-Z0-9]{4,10}`).Draw(t, "safeVal")
+		customParam := "param_" + rapid.StringMatching(`[a-z]{3,8}`).Draw(t, "customParam")
+
+		rawURL := fmt.Sprintf("https://user:%s@api.example.com/v1/resource?token=%s&%s=%s&safe=%s",
+			secretVal, secretVal, customParam, secretVal, safeVal)
+
+		sanitizedOnce := SanitizeURLString(rawURL, true, []string{customParam})
+		sanitizedTwice := SanitizeURLString(sanitizedOnce, true, []string{customParam})
+
+		assert.NotContains(t, sanitizedOnce, secretVal)
+		assert.Contains(t, sanitizedOnce, "safe="+safeVal)
+		assert.Equal(t, sanitizedOnce, sanitizedTwice)
+
+		bodyMap := map[string]any{
+			customParam: secretVal,
+			"safe_key":  safeVal,
+			"nested": map[string]any{
+				"password": secretVal,
+			},
+		}
+		rawJSON, err := json.Marshal(bodyMap)
+		require.NoError(t, err)
+
+		redactedOnce, ok := RedactJSONBodyFields(rawJSON, []string{customParam, "nested.password"})
+		require.True(t, ok)
+		assert.NotContains(t, string(redactedOnce), secretVal)
+		assert.Contains(t, string(redactedOnce), safeVal)
+	})
+}

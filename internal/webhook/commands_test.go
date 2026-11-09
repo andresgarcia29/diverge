@@ -65,12 +65,13 @@ func TestParseSlashCommand(t *testing.T) {
 			},
 		},
 		{
-			name:   "replay command multiple paths",
-			body:   "/diverge replay /api/v1/health /api/v1/orders",
+			name:   "replay command multiple paths with --fix",
+			body:   "/diverge replay /api/v1/health /api/v1/orders --fix",
 			wantOK: true,
 			wantCmd: &SlashCommand{
-				Action: "replay",
-				Paths:  []string{"/api/v1/health", "/api/v1/orders"},
+				Action:  "replay",
+				Paths:   []string{"/api/v1/health", "/api/v1/orders"},
+				AutoFix: true,
 			},
 		},
 		{
@@ -218,6 +219,7 @@ func TestParseSlashCommand(t *testing.T) {
 				assert.Equal(t, tc.wantCmd.BudgetUSD, cmd.BudgetUSD)
 				assert.Equal(t, tc.wantCmd.Tokens, cmd.Tokens)
 				assert.Equal(t, tc.wantCmd.Paths, cmd.Paths)
+				assert.Equal(t, tc.wantCmd.AutoFix, cmd.AutoFix)
 			}
 		})
 	}
@@ -554,4 +556,50 @@ func TestExecuteSlashCommand_VerifyAndReplay(t *testing.T) {
 	assert.ElementsMatch(t, []string{"", "pr-77"}, seenHeaders["/api/v1/checkout"])
 	assert.ElementsMatch(t, []string{"", "pr-77"}, seenHeaders["/healthz"])
 	mu.Unlock()
+
+	// 5. Subdomain-routed preview with baseline externalUrl and self-healing --fix on failure
+	baselineSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ord-1","total":100}`))
+	}))
+	defer baselineSrv.Close()
+
+	previewSubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/broken" {
+			// Preview drops "total" field -> breaking contract diff
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"ord-1"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ord-1","total":100}`))
+	}))
+	defer previewSubSrv.Close()
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: envName, Namespace: "default"}, &env))
+	env.Spec.Routing.Mode = "subdomain"
+	env.Spec.Routing.ExternalURL = baselineSrv.URL
+	env.Status.URL = previewSubSrv.URL
+	require.NoError(t, c.Update(ctx, &env))
+
+	subVerifyCmd, ok := ParseSlashCommand("/diverge verify /healthz")
+	require.True(t, ok)
+	subVerifyFeedback, err := ExecuteSlashCommandWithFeedback(ctx, c, "default", subVerifyCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+	assert.Contains(t, subVerifyFeedback, "Diverge Verify Passed")
+
+	subReplayFixCmd, ok := ParseSlashCommand("/diverge replay /api/v1/broken --fix")
+	require.True(t, ok)
+	subReplayFeedback, err := ExecuteSlashCommandWithFeedback(ctx, c, "default", subReplayFixCmd, repoURL, branch, prNumber)
+	require.NoError(t, err)
+	assert.Contains(t, subReplayFeedback, "Diverge Traffic Replay Failed")
+	assert.Contains(t, subReplayFeedback, "Self-Healing Triggered")
+
+	var tasks v1alpha1.AgentTaskList
+	require.NoError(t, c.List(ctx, &tasks, client.InNamespace("default")))
+	require.Len(t, tasks.Items, 1)
+	assert.Equal(t, "replay", tasks.Items[0].Labels["diverge.io/autofix"])
+	assert.Contains(t, tasks.Items[0].Spec.Objective, "missing_field")
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -212,11 +213,29 @@ func TestResolveEntryURL_RewriteAndSSRF(t *testing.T) {
 }
 
 func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
-	var seenAuth, seenCookie, seenCustom string
+	type capturedHeaders struct {
+		auth   string
+		cookie string
+		custom string
+	}
+	var (
+		mu       sync.Mutex
+		baseSeen capturedHeaders
+		prevSeen capturedHeaders
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenAuth = r.Header.Get("Authorization")
-		seenCookie = r.Header.Get("Cookie")
-		seenCustom = r.Header.Get("X-Secret-Token")
+		snap := capturedHeaders{
+			auth:   r.Header.Get("Authorization"),
+			cookie: r.Header.Get("Cookie"),
+			custom: r.Header.Get("X-Secret-Token"),
+		}
+		mu.Lock()
+		if r.Header.Get("x-diverge-env") == "pr-42" {
+			prevSeen = snap
+		} else {
+			baseSeen = snap
+		}
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -229,7 +248,7 @@ func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
 			Path:   "https://staging.example.com/api/v1/orders",
 			Headers: map[string]string{
 				"Authorization":  "Bearer secret-jwt",
-				"Cookie":         "diverge_env=pr-10; session=abc",
+				"Cookie":         "diverge_env=pr-10; DIVERGE_ENV=keep; session=abc",
 				"X-Secret-Token": "top-secret",
 			},
 		},
@@ -244,6 +263,7 @@ func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
 	runnerKeepSession := NewRunner(Config{
 		Environment:        "pr-42",
 		BaseURL:            srv.URL,
+		HeaderValue:        "pr-42",
 		FilterHosts:        []string{"*.example.com"},
 		StripHeaders:       []string{"X-Secret-Token"},
 		FailOnStatusDiff:   true,
@@ -254,14 +274,20 @@ func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
 	assert.True(t, report.Passed)
 	require.Len(t, report.Results, 1)
 	assert.Equal(t, "keep-staging", report.Results[0].ID)
-	assert.Equal(t, "Bearer secret-jwt", seenAuth)
-	assert.Equal(t, "session=abc", seenCookie)
-	assert.Empty(t, seenCustom)
+	mu.Lock()
+	assert.Equal(t, "Bearer secret-jwt", baseSeen.auth)
+	assert.Equal(t, "DIVERGE_ENV=keep; session=abc", baseSeen.cookie)
+	assert.Empty(t, baseSeen.custom)
+	assert.Equal(t, "Bearer secret-jwt", prevSeen.auth)
+	assert.Equal(t, "DIVERGE_ENV=keep; session=abc", prevSeen.cookie)
+	assert.Empty(t, prevSeen.custom)
+	mu.Unlock()
 
-	// Verify StripAuth removes Authorization and Cookie completely
+	// Verify StripAuth removes Authorization and Cookie completely on both baseline and preview
 	runnerStripAuth := NewRunner(Config{
 		Environment:        "pr-42",
 		BaseURL:            srv.URL,
+		HeaderValue:        "pr-42",
 		FilterHosts:        []string{"staging.example.com"},
 		StripAuth:          true,
 		FailOnStatusDiff:   true,
@@ -270,8 +296,15 @@ func TestFilterEntriesByHostAndStripAuth(t *testing.T) {
 	report2, err := runnerStripAuth.Run(context.Background(), entries)
 	require.NoError(t, err)
 	assert.True(t, report2.Passed)
-	assert.Empty(t, seenAuth)
-	assert.Empty(t, seenCookie)
+	mu.Lock()
+	assert.Empty(t, baseSeen.auth)
+	assert.Empty(t, baseSeen.cookie)
+	assert.Empty(t, prevSeen.auth)
+	assert.Empty(t, prevSeen.cookie)
+	mu.Unlock()
+
+	// Empty/whitespace FilterHosts slice rejects all entries instead of silently keeping them
+	assert.Empty(t, FilterEntriesByHost(entries, []string{" , "}))
 }
 
 func TestFormatReportOutputs(t *testing.T) {

@@ -160,6 +160,7 @@ func ParseSlashCommand(commentBody string) (*SlashCommand, bool) {
 	return nil, false
 }
 
+// parseSafeRelativePaths validates and returns safe relative URL paths from slash command arguments.
 func parseSafeRelativePaths(tokens []string) ([]string, bool) {
 	if len(tokens) == 0 {
 		return []string{"/"}, true
@@ -167,7 +168,23 @@ func parseSafeRelativePaths(tokens []string) ([]string, bool) {
 	paths := make([]string, 0, len(tokens))
 	for _, tok := range tokens {
 		p := strings.TrimSpace(tok)
-		if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.Contains(p, "..") {
+		lower := strings.ToLower(p)
+		if p == "" ||
+			!strings.HasPrefix(p, "/") ||
+			strings.HasPrefix(p, "//") ||
+			strings.Contains(p, "..") ||
+			strings.Contains(p, "\\") ||
+			strings.Contains(lower, "%2e") ||
+			strings.Contains(lower, "%2f") ||
+			strings.Contains(lower, "%5c") {
+			return nil, false
+		}
+		unescaped, err := url.PathUnescape(p)
+		if err != nil ||
+			!strings.HasPrefix(unescaped, "/") ||
+			strings.HasPrefix(unescaped, "//") ||
+			strings.Contains(unescaped, "..") ||
+			strings.Contains(unescaped, "\\") {
 			return nil, false
 		}
 		paths = append(paths, p)
@@ -175,6 +192,7 @@ func parseSafeRelativePaths(tokens []string) ([]string, bool) {
 	return paths, true
 }
 
+// parseResumeArgs parses optional budget and token increments from a resume or budget slash command.
 func parseResumeArgs(fields []string) (string, int64, error) {
 	if len(fields) <= 1 {
 		return "", 0, nil
@@ -251,6 +269,7 @@ func ExecuteSlashCommandWithFeedback(ctx context.Context, c client.Client, ns st
 	}
 }
 
+// executeFixCommand creates or updates an AgentTask for a /diverge fix slash command.
 func executeFixCommand(ctx context.Context, c client.Client, ns string, cmd *SlashCommand, repoURL, branch string, prNumber int) (string, error) {
 	if strings.TrimSpace(cmd.Objective) == "" {
 		return "", fmt.Errorf("fix command requires a non-empty objective")
@@ -306,6 +325,7 @@ func executeFixCommand(ctx context.Context, c client.Client, ns string, cmd *Sla
 	return feedback, nil
 }
 
+// executeGuideCommand attaches runtime guidance annotations to active AgentTasks for a PR/MR.
 func executeGuideCommand(ctx context.Context, c client.Client, ns, guidance, repoURL string, prNumber int) (string, error) {
 	if strings.TrimSpace(guidance) == "" {
 		return "", fmt.Errorf("guide command requires non-empty guidance text")
@@ -350,6 +370,7 @@ func executeGuideCommand(ctx context.Context, c client.Client, ns, guidance, rep
 	return fmt.Sprintf("🧭 **Guidance saved** to %d agent tasks:\n\n> %s\n\nThis guidance will be delivered to the agents on their next iteration.", len(matchedTasks), guidance), nil
 }
 
+// executePreviewCommand provisions or updates an Environment CR for a PR/MR.
 func executePreviewCommand(ctx context.Context, c client.Client, ns, repoURL, branch string, prNumber int) (string, error) {
 	project := projectFromRepoURL(repoURL)
 	provider := providerFromRepoURL(repoURL)
@@ -395,51 +416,69 @@ func executePreviewCommand(ctx context.Context, c client.Client, ns, repoURL, br
 	return feedback, nil
 }
 
-func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (envName, baseURL, headerKey, headerValue string, found bool, err error) {
+// resolvePreviewTarget resolves the preview environment name, base URL, routing mode, and routing header key/value for a PR/MR.
+func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (envName, baseURL, routingMode, headerKey, headerValue string, found bool, err error) {
 	envs, err := findMatchingEnvironments(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", "", false, err
 	}
-	pgs, err := findMatchingPreviewGroups(ctx, c, repoURL, prNumber)
-	if err != nil {
-		return "", "", "", "", false, err
-	}
-	if len(envs) == 0 && len(pgs) == 0 {
-		return "", "", "", "", false, nil
-	}
-
-	headerKey = replay.DefaultHeaderKey
 	if len(envs) > 0 {
 		env := envs[0]
+		for i := range envs {
+			if strings.TrimSpace(envs[i].Status.URL) != "" {
+				env = envs[i]
+				break
+			}
+		}
 		envName = env.Name
+		routingMode = strings.TrimSpace(env.Spec.Routing.Mode)
+		headerKey = replay.DefaultHeaderKey
 		if env.Spec.Routing.HeaderKey != "" {
 			headerKey = env.Spec.Routing.HeaderKey
 		}
+		headerValue = env.Name
 		if env.Spec.Routing.HeaderValue != "" {
 			headerValue = env.Spec.Routing.HeaderValue
 		}
 		if env.Status.URL != "" {
 			baseURL = stripPreviewQueryParam(env.Status.URL)
+		} else if env.Spec.Routing.ExternalURL != "" {
+			baseURL = stripPreviewQueryParam(env.Spec.Routing.ExternalURL)
 		}
+		return envName, baseURL, routingMode, headerKey, headerValue, true, nil
 	}
-	if len(pgs) > 0 {
-		pg := pgs[0]
-		if envName == "" {
-			envName = pg.Name
-		}
-		if pg.Spec.Routing.HeaderKey != "" {
-			headerKey = pg.Spec.Routing.HeaderKey
-		}
-		if pg.Spec.Routing.HeaderValue != "" && headerValue == "" {
-			headerValue = pg.Spec.Routing.HeaderValue
-		}
+
+	pgs, err := findMatchingPreviewGroups(ctx, c, repoURL, prNumber)
+	if err != nil {
+		return "", "", "", "", "", false, err
 	}
-	if headerValue == "" {
-		headerValue = envName
+	if len(pgs) == 0 {
+		return "", "", "", "", "", false, nil
 	}
-	return envName, baseURL, headerKey, headerValue, true, nil
+	if len(pgs) > 1 {
+		return "", "", "", "", "", false, fmt.Errorf("multiple PreviewGroups (%d) matched PR/MR #%d; cannot unambiguously resolve preview target", len(pgs), prNumber)
+	}
+
+	pg := pgs[0]
+	envName = pg.Name
+	routingMode = strings.TrimSpace(pg.Spec.Routing.Mode)
+	headerKey = replay.DefaultHeaderKey
+	if pg.Spec.Routing.HeaderKey != "" {
+		headerKey = pg.Spec.Routing.HeaderKey
+	}
+	headerValue = pg.Name
+	if pg.Spec.Routing.HeaderValue != "" {
+		headerValue = pg.Spec.Routing.HeaderValue
+	}
+	if ext := strings.TrimSpace(pg.Spec.Routing.ExternalURL); ext != "" && !strings.Contains(ext, "{") {
+		baseURL = stripPreviewQueryParam(ext)
+	} else if len(pg.Status.Services) == 1 && strings.TrimSpace(pg.Status.Services[0].URL) != "" {
+		baseURL = stripPreviewQueryParam(pg.Status.Services[0].URL)
+	}
+	return envName, baseURL, routingMode, headerKey, headerValue, true, nil
 }
 
+// stripPreviewQueryParam removes the _diverge_env sticky-routing query parameter from a preview URL.
 func stripPreviewQueryParam(rawURL string) string {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -451,8 +490,9 @@ func stripPreviewQueryParam(rawURL string) string {
 	return strings.TrimRight(parsed.String(), "/")
 }
 
+// executeVerifyCommand runs cluster workload diagnostics and HTTP parity/health probes for a PR/MR preview environment.
 func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
-	envName, baseURL, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+	envName, baseURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
 		return "", err
 	}
@@ -465,13 +505,13 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 
 	diagnoser := doctor.NewDiagnoser(c)
 	docReport, docErr := diagnoser.Diagnose(ctx, ns, envName)
-	docSkipped := docErr != nil && (runtime.IsNotRegisteredError(docErr) || strings.Contains(docErr.Error(), "no kind is registered"))
 
 	var b strings.Builder
-	docHealthy := docSkipped || (docErr == nil && docReport != nil && docReport.Healthy)
-	replayPassed := true
+	docHealthy := docErr == nil && docReport != nil && docReport.Healthy
+	replayPassed := false
 	var repReport *replay.Report
-	if baseURL != "" {
+	subdomainRouted := strings.EqualFold(routingMode, "subdomain")
+	if baseURL != "" && !subdomainRouted {
 		entries := make([]replay.RequestEntry, 0, len(paths))
 		for _, p := range paths {
 			entries = append(entries, replay.RequestEntry{
@@ -488,9 +528,19 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 			FailOnStatusDiff: true,
 			Timeout:          5 * time.Second,
 		}).Run(ctx, entries)
-		if err != nil {
-			replayPassed = false
-		} else if repReport != nil {
+		if err == nil && repReport != nil {
+			for i := range repReport.Results {
+				r := &repReport.Results[i]
+				if r.PreviewStatus < 200 || r.PreviewStatus >= 400 {
+					if r.Passed {
+						r.Passed = false
+						repReport.PassedRequests--
+						repReport.FailedRequests++
+					}
+					r.FailureReasons = append(r.FailureReasons, fmt.Sprintf("preview returned unhealthy HTTP %d", r.PreviewStatus))
+				}
+			}
+			repReport.Passed = repReport.TotalRequests > 0 && repReport.FailedRequests == 0
 			replayPassed = repReport.Passed
 		}
 	}
@@ -502,9 +552,7 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 		fmt.Fprintf(&b, "### ❌ Diverge Verify Failed: `%s`\n\n", envName)
 	}
 
-	if docSkipped {
-		b.WriteString("- **Workload Diagnostics**: ✅ Preview environment resource verified\n")
-	} else if docErr != nil {
+	if docErr != nil {
 		fmt.Fprintf(&b, "- **Workload Diagnostics**: ❌ Error (`%v`)\n", docErr)
 	} else if docReport != nil && docReport.Healthy {
 		b.WriteString("- **Workload Diagnostics**: ✅ All preview workloads, migrations, and routes healthy\n")
@@ -512,6 +560,10 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 		fmt.Fprintf(&b, "- **Workload Diagnostics**: ❌ %d issue(s) detected\n", len(docReport.Issues))
 	}
 
+	if subdomainRouted {
+		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (subdomain-routed environment requires an explicit baseline URL for parity comparison)\n")
+		return b.String(), nil
+	}
 	if baseURL == "" {
 		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (preview URL not yet assigned in `status.url`)\n")
 		return b.String(), nil
@@ -531,13 +583,17 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 	return b.String(), nil
 }
 
+// executeReplayCommand runs deterministic baseline-vs-preview HTTP parity checks across the requested paths for a PR/MR preview environment.
 func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
-	envName, baseURL, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+	envName, baseURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
 		return "", err
 	}
 	if !found {
 		return "⚠️ No active preview environment found for this PR/MR. Run `/diverge preview` first.", nil
+	}
+	if strings.EqualFold(routingMode, "subdomain") {
+		return fmt.Sprintf("⚠️ Preview environment `%s` uses subdomain routing, which requires an explicit baseline URL (`diverge replay %s --base-url <baseline-url>`).", envName, envName), nil
 	}
 	if baseURL == "" {
 		return fmt.Sprintf("⚠️ Preview environment `%s` does not have an active target URL yet (`status.url` is empty).", envName), nil
@@ -574,6 +630,7 @@ func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths
 	return mdBuf.String(), nil
 }
 
+// executeTeardownCommand deletes all matching Environments, PreviewGroups, and AgentTasks for a PR/MR.
 func executeTeardownCommand(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (string, error) {
 	envs, err := findMatchingEnvironments(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
@@ -615,6 +672,7 @@ func executeTeardownCommand(ctx context.Context, c client.Client, ns, repoURL st
 	return feedback, nil
 }
 
+// executeExtendTTLCommand extends the lifecycle TTL on all matching Environments and PreviewGroups for a PR/MR.
 func executeExtendTTLCommand(ctx context.Context, c client.Client, ns string, dur time.Duration, repoURL string, prNumber int) (string, error) {
 	if dur <= 0 {
 		dur = defaultExtendTTLDuration
@@ -651,6 +709,7 @@ func executeExtendTTLCommand(ctx context.Context, c client.Client, ns string, du
 	return feedback, nil
 }
 
+// executeSuspendTaskCommand pauses or resumes active AgentTasks for a PR/MR, optionally increasing budget and token limits.
 func executeSuspendTaskCommand(ctx context.Context, c client.Client, ns, repoURL string, prNumber int, suspend bool, budgetUSD string, tokens int64) (string, error) {
 	var taskList v1alpha1.AgentTaskList
 	if err := c.List(ctx, &taskList, client.InNamespace(ns)); err != nil {
@@ -723,6 +782,7 @@ func executeSuspendTaskCommand(ctx context.Context, c client.Client, ns, repoURL
 	return fmt.Sprintf("▶️ **Agent task resumed**: `%s`%s\n\nThe autonomous loop will continue execution.", taskName, extraStr), nil
 }
 
+// executeBudgetCommand increases budget and token limits on matching AgentTasks without altering their suspension state.
 func executeBudgetCommand(ctx context.Context, c client.Client, ns, repoURL string, prNumber int, budgetUSD string, tokens int64) (string, error) {
 	var taskList v1alpha1.AgentTaskList
 	if err := c.List(ctx, &taskList, client.InNamespace(ns)); err != nil {
@@ -779,6 +839,7 @@ func executeBudgetCommand(ctx context.Context, c client.Client, ns, repoURL stri
 	return fmt.Sprintf("💰 **Agent task budget updated**: `%s`%s\n\nTask suspension state was not modified.", taskName, extraStr), nil
 }
 
+// executeStatusCommand formats a Markdown summary of active AgentTasks and Environments for a PR/MR.
 func executeStatusCommand(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (string, error) {
 	var taskList v1alpha1.AgentTaskList
 	if err := c.List(ctx, &taskList, client.InNamespace(ns)); err != nil {
@@ -850,6 +911,7 @@ func executeStatusCommand(ctx context.Context, c client.Client, ns, repoURL stri
 	return b.String(), nil
 }
 
+// matchesTaskPR reports whether task belongs to the specified repository and PR/MR number.
 func matchesTaskPR(task *v1alpha1.AgentTask, repoURL string, prNumber int, prStr string) bool {
 	if repoURL != "" && normalizeRepoURL(task.Spec.Repository.URL) != normalizeRepoURL(repoURL) {
 		return false
@@ -866,10 +928,12 @@ func matchesTaskPR(task *v1alpha1.AgentTask, repoURL string, prNumber int, prStr
 	return repoURL != ""
 }
 
+// normalizeRepoURL normalizes a Git repository URL for case-insensitive comparison.
 func normalizeRepoURL(raw string) string {
 	return strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), "/"), ".git")
 }
 
+// findMatchingEnvironments returns all Environment resources in ns associated with repoURL and prNumber.
 func findMatchingEnvironments(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) ([]v1alpha1.Environment, error) {
 	var envList v1alpha1.EnvironmentList
 	if err := c.List(ctx, &envList, client.InNamespace(ns)); err != nil {
@@ -907,6 +971,7 @@ func findMatchingEnvironments(ctx context.Context, c client.Client, ns, repoURL 
 	return matched, nil
 }
 
+// findMatchingPreviewGroups returns all PreviewGroup resources associated with repoURL and prNumber.
 func findMatchingPreviewGroups(ctx context.Context, c client.Client, repoURL string, prNumber int) ([]v1alpha1.PreviewGroup, error) {
 	var pgList v1alpha1.PreviewGroupList
 	if err := c.List(ctx, &pgList); err != nil {
@@ -936,6 +1001,7 @@ func findMatchingPreviewGroups(ctx context.Context, c client.Client, repoURL str
 	return matched, nil
 }
 
+// buildCommandTaskName constructs a deterministic Kubernetes resource name for an AgentTask.
 func buildCommandTaskName(repoURL string, prNumber int, objective string) string {
 	raw := fmt.Sprintf("task-pr-%d", prNumber)
 	if prNumber <= 0 {
@@ -948,6 +1014,7 @@ func buildCommandTaskName(repoURL string, prNumber int, objective string) string
 	return fmt.Sprintf("%s-%s", raw, hash)
 }
 
+// projectFromRepoURL extracts the owner/repo project path from a repository URL.
 func projectFromRepoURL(repoURL string) string {
 	trimmed := strings.TrimSpace(repoURL)
 	trimmed = strings.TrimSuffix(trimmed, ".git")
@@ -957,6 +1024,7 @@ func projectFromRepoURL(repoURL string) string {
 	return strings.Trim(trimmed, "/")
 }
 
+// providerFromRepoURL infers the SCM provider ("gitlab" or "github") from a repository URL.
 func providerFromRepoURL(repoURL string) string {
 	lower := strings.ToLower(repoURL)
 	if strings.Contains(lower, "gitlab") {

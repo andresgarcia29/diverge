@@ -154,6 +154,23 @@ diverge:preview:
           curl -fsSL https://raw.githubusercontent.com/divergedev/diverge/main/install.sh | sh
         fi
         kubectl wait -n "${DIVERGE_NAMESPACE}" --for=condition=Ready "previewgroup/${PREVIEW_NAME}" --timeout=180s
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+          GEN_PAIR="$(kubectl get previewgroup "${PREVIEW_NAME}" -n "${DIVERGE_NAMESPACE}" -o jsonpath='{.metadata.generation}:{.status.conditions[?(@.type=="Ready")].observedGeneration}' 2>/dev/null || true)"
+          META_GEN="${GEN_PAIR%%:*}"
+          OBS_GEN="${GEN_PAIR#*:}"
+          case "${META_GEN}:${OBS_GEN}" in
+            [0-9]*:[0-9]*)
+              if [ "${OBS_GEN}" -ge "${META_GEN}" ]; then
+                break
+              fi
+              ;;
+            *)
+              break
+              ;;
+          esac
+          sleep 2
+          kubectl wait -n "${DIVERGE_NAMESPACE}" --for=condition=Ready "previewgroup/${PREVIEW_NAME}" --timeout=180s
+        done
         if [ -n "${DIVERGE_BASE_URL:-}" ]; then
           diverge replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}" --base-url "${DIVERGE_BASE_URL}"
         else

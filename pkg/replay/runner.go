@@ -197,6 +197,29 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 	return report, nil
 }
 
+type requestSanitizePolicy struct {
+	routingKey   string
+	routingVal   string
+	stripAuth    bool
+	stripHeaders []string
+}
+
+type sanitizePolicyContextKey struct{}
+
+type sanitizingRoundTripper struct {
+	base http.RoundTripper
+}
+
+// RoundTrip sanitizes outbound request headers and cookies (including any cookies injected by an http.CookieJar) before delegating to the underlying transport.
+func (s *sanitizingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
+		cloned := req.Clone(req.Context())
+		sanitizeRequestHeaders(cloned, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
+		req = cloned
+	}
+	return s.base.RoundTrip(req)
+}
+
 // secureHTTPClient returns an http.Client with dial-time SSRF IP validation and redirect target validation.
 func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
@@ -257,9 +280,10 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 		out = http.Client{Timeout: timeout}
 	}
 
+	var baseTransport http.RoundTripper
 	switch tr := out.Transport.(type) {
 	case nil:
-		out.Transport = &http.Transport{
+		baseTransport = &http.Transport{
 			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 50,
@@ -277,13 +301,19 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 		cloned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return safeDial(ctx, network, addr, origDial)
 		}
-		out.Transport = cloned
+		baseTransport = cloned
+	default:
+		baseTransport = tr
 	}
+	out.Transport = &sanitizingRoundTripper{base: baseTransport}
 
 	origRedirect := out.CheckRedirect
 	out.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := loadtest.ValidateTargetURL(req.URL.String()); err != nil {
 			return fmt.Errorf("redirect target prohibited: %w", err)
+		}
+		if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
+			sanitizeRequestHeaders(req, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
 		}
 		if origRedirect != nil {
 			return origRedirect(req, via)
@@ -420,13 +450,19 @@ func normalizeGRPCStatus(status string) string {
 	return trimmed
 }
 
+// hasHTTPScheme reports whether raw starts with a case-insensitive http:// or https:// scheme.
+func hasHTTPScheme(raw string) bool {
+	return (len(raw) >= 7 && strings.EqualFold(raw[:7], "http://")) ||
+		(len(raw) >= 8 && strings.EqualFold(raw[:8], "https://"))
+}
+
 // ResolveEntryURL resolves a trace entry's path or URL against an optional base URL and validates against SSRF.
 func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	trimmedBase := strings.TrimSpace(baseURL)
 	trimmedPath := strings.TrimSpace(entryPath)
 
 	var finalURL string
-	if strings.HasPrefix(trimmedPath, "http://") || strings.HasPrefix(trimmedPath, "https://") {
+	if hasHTTPScheme(trimmedPath) {
 		if trimmedBase == "" {
 			finalURL = trimmedPath
 		} else {
@@ -470,6 +506,9 @@ func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 // FilterEntriesByHost retains relative-path entries and absolute-URL entries whose hostname matches one of allowedHosts
 // (supporting exact hostname matches like "api.example.com" and wildcard subdomain patterns like "*.example.com").
 func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []RequestEntry {
+	if len(allowedHosts) == 0 {
+		return entries
+	}
 	var normalized []string
 	for _, h := range allowedHosts {
 		for _, part := range strings.Split(h, ",") {
@@ -480,13 +519,13 @@ func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []Reques
 		}
 	}
 	if len(normalized) == 0 {
-		return entries
+		return []RequestEntry{}
 	}
 
 	filtered := make([]RequestEntry, 0, len(entries))
 	for _, entry := range entries {
 		trimmed := strings.TrimSpace(entry.Path)
-		if !strings.HasPrefix(trimmed, "http://") && !strings.HasPrefix(trimmed, "https://") {
+		if !hasHTTPScheme(trimmed) {
 			filtered = append(filtered, entry)
 			continue
 		}
@@ -502,6 +541,7 @@ func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []Reques
 	return filtered
 }
 
+// hostMatchesFilter reports whether host matches any exact hostname or "*.domain" wildcard pattern in patterns.
 func hostMatchesFilter(host string, patterns []string) bool {
 	if host == "" {
 		return false
@@ -520,30 +560,12 @@ func hostMatchesFilter(host string, patterns []string) bool {
 	return false
 }
 
-// executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string) (int, string, string, []byte, time.Duration, error) {
-	reqCtx := ctx
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		reqCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(reqCtx, method, targetURL, bodyReader)
-	if err != nil {
-		return 0, "", "", nil, 0, err
-	}
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
+// sanitizeRequestHeaders strips configured auth/custom headers and recorded Diverge routing headers/cookies, then injects preview routing headers when routingVal is set.
+func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, stripAuth bool, stripHeaders []string) {
 	if stripAuth {
+		if req.URL != nil {
+			req.URL.User = nil
+		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Proxy-Authorization")
 		req.Header.Del("Cookie")
@@ -573,6 +595,38 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 			req.Header.Set("baggage", baggageItem)
 		}
 	}
+}
+
+// executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string) (int, string, string, []byte, time.Duration, error) {
+	policy := requestSanitizePolicy{
+		routingKey:   routingKey,
+		routingVal:   routingVal,
+		stripAuth:    stripAuth,
+		stripHeaders: stripHeaders,
+	}
+	reqCtx := context.WithValue(ctx, sanitizePolicyContextKey{}, policy)
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		reqCtx, cancel = context.WithTimeout(reqCtx, timeout)
+		defer cancel()
+	}
+
+	var bodyReader io.Reader
+	if len(body) > 0 {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, method, targetURL, bodyReader)
+	if err != nil {
+		return 0, "", "", nil, 0, err
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	sanitizeRequestHeaders(req, routingKey, routingVal, stripAuth, stripHeaders)
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -635,8 +689,8 @@ func stripDivergeCookie(hdr *http.Header) {
 			if trimmed == "" {
 				continue
 			}
-			lower := strings.ToLower(trimmed)
-			if lower == "diverge_env" || strings.HasPrefix(lower, "diverge_env=") {
+			name, _, _ := strings.Cut(trimmed, "=")
+			if strings.TrimSpace(name) == "diverge_env" {
 				continue
 			}
 			kept = append(kept, trimmed)

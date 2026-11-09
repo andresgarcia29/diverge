@@ -284,6 +284,19 @@ case "$INPUT_ACTION" in
         "$DIVERGE_BIN" doctor "$PREVIEW_NAME" -n "$NAMESPACE" || true
         exit 1
       fi
+      for _ in $(seq 1 15); do
+        GEN_PAIR="$("$KUBECTL_BIN" get previewgroup "$PREVIEW_NAME" -n "$INPUT_NAMESPACE" -o jsonpath='{.metadata.generation}:{.status.conditions[?(@.type=="Ready")].observedGeneration}' 2>/dev/null || true)"
+        META_GEN="${GEN_PAIR%%:*}"
+        OBS_GEN="${GEN_PAIR#*:}"
+        if [[ ! "$META_GEN" =~ ^[0-9]+$ ]] || [[ ! "$OBS_GEN" =~ ^[0-9]+$ ]] || [[ "$OBS_GEN" -ge "$META_GEN" ]]; then
+          break
+        fi
+        sleep 2
+        if ! "$KUBECTL_BIN" wait -n "$INPUT_NAMESPACE" --for=condition=Ready "previewgroup/$PREVIEW_NAME" --timeout="$INPUT_WAIT_TIMEOUT"; then
+          "$DIVERGE_BIN" doctor "$PREVIEW_NAME" -n "$NAMESPACE" || true
+          exit 1
+        fi
+      done
     fi
 
     PREVIEW_URL=""

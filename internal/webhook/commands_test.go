@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,16 @@ func TestParseSlashCommand(t *testing.T) {
 		{
 			name:   "verify command rejects path traversal",
 			body:   "/diverge verify /../etc/passwd",
+			wantOK: false,
+		},
+		{
+			name:   "verify command rejects percent-encoded path traversal",
+			body:   "/diverge verify /%2e%2e/etc/passwd",
+			wantOK: false,
+		},
+		{
+			name:   "replay command rejects percent-encoded slash traversal",
+			body:   "/diverge replay /api%2f..%2fadmin",
 			wantOK: false,
 		},
 		{
@@ -482,8 +493,17 @@ func TestExecuteSlashCommand_VerifyAndReplay(t *testing.T) {
 	assert.Contains(t, feedback, "No active preview environment found")
 
 	// 2. Stand up httptest gateway that routes based on x-diverge-env
+	var (
+		mu          sync.Mutex
+		seenHeaders = make(map[string][]string)
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isPreview := r.Header.Get("x-diverge-env") == "pr-77"
+		hdrVal := r.Header.Get("x-diverge-env")
+		mu.Lock()
+		seenHeaders[r.URL.Path] = append(seenHeaders[r.URL.Path], hdrVal)
+		mu.Unlock()
+
+		isPreview := hdrVal == "pr-77"
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if isPreview {
@@ -517,6 +537,10 @@ func TestExecuteSlashCommand_VerifyAndReplay(t *testing.T) {
 	assert.Contains(t, feedback, "Diverge Verify Passed")
 	assert.Contains(t, feedback, "Workload Diagnostics")
 	assert.Contains(t, feedback, "/healthz")
+	mu.Lock()
+	assert.ElementsMatch(t, []string{"", "pr-77"}, seenHeaders["/healthz"])
+	seenHeaders = make(map[string][]string)
+	mu.Unlock()
 
 	// 4. Execute /diverge replay /api/v1/checkout /healthz
 	replayCmd, ok := ParseSlashCommand("/diverge replay /api/v1/checkout /healthz")
@@ -526,4 +550,8 @@ func TestExecuteSlashCommand_VerifyAndReplay(t *testing.T) {
 	assert.Contains(t, feedback, "Diverge Traffic Replay Passed")
 	assert.Contains(t, feedback, "/api/v1/checkout")
 	assert.Contains(t, feedback, "/healthz")
+	mu.Lock()
+	assert.ElementsMatch(t, []string{"", "pr-77"}, seenHeaders["/api/v1/checkout"])
+	assert.ElementsMatch(t, []string{"", "pr-77"}, seenHeaders["/healthz"])
+	mu.Unlock()
 }

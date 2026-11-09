@@ -82,6 +82,7 @@ func (d *KEDADeployer) Deploy(ctx context.Context, env *v1alpha1.Environment) er
 			targetPort = int64(env.Spec.ServiceConfig.Port)
 		}
 	}
+	targetName = boundK8sName(targetName)
 
 	// S1: Check if KEDA is explicitly disabled via CRD
 	if env.Spec.ServiceConfig != nil && env.Spec.ServiceConfig.KEDA != nil {
@@ -102,6 +103,14 @@ func (d *KEDADeployer) Deploy(ctx context.Context, env *v1alpha1.Environment) er
 		"divergedev.com/environment": env.Name,
 	})
 
+	if isArgoRolloutsDeployer(d.Inner) {
+		if err := unstructured.SetNestedField(hso.Object, "argoproj.io/v1alpha1", "spec", "scaleTargetRef", "apiVersion"); err != nil {
+			return fmt.Errorf("failed to set scaleTargetRef.apiVersion: %w", err)
+		}
+		if err := unstructured.SetNestedField(hso.Object, "Rollout", "spec", "scaleTargetRef", "kind"); err != nil {
+			return fmt.Errorf("failed to set scaleTargetRef.kind: %w", err)
+		}
+	}
 	if err := unstructured.SetNestedField(hso.Object, targetName, "spec", "scaleTargetRef", "name"); err != nil {
 		return fmt.Errorf("failed to set scaleTargetRef.name: %w", err)
 	}
@@ -218,6 +227,7 @@ func (d *KEDADeployer) Teardown(ctx context.Context, env *v1alpha1.Environment) 
 	if env.Spec.ServiceConfig != nil && env.Spec.ServiceConfig.ServiceName != "" {
 		targetName = fmt.Sprintf("%s-%s", env.Name, env.Spec.ServiceConfig.ServiceName)
 	}
+	targetName = boundK8sName(targetName)
 
 	hso := &unstructured.Unstructured{}
 	hso.SetGroupVersionKind(hsoGVK)
@@ -250,6 +260,7 @@ func (d *KEDADeployer) Status(ctx context.Context, env *v1alpha1.Environment) ([
 	if env.Spec.ServiceConfig != nil && env.Spec.ServiceConfig.ServiceName != "" {
 		targetName = fmt.Sprintf("%s-%s", env.Name, env.Spec.ServiceConfig.ServiceName)
 	}
+	targetName = boundK8sName(targetName)
 
 	hso := &unstructured.Unstructured{}
 	hso.SetGroupVersionKind(hsoGVK)
@@ -280,6 +291,7 @@ func (d *KEDADeployer) Status(ctx context.Context, env *v1alpha1.Environment) ([
 	return innerStatus, nil
 }
 
+// isHSOReady reports whether an HTTPScaledObject has Ready=True in its status conditions.
 func isHSOReady(hso *unstructured.Unstructured) bool {
 	conditions, found, err := unstructured.NestedSlice(hso.Object, "status", "conditions")
 	if !found || err != nil {
@@ -290,6 +302,23 @@ func isHSOReady(hso *unstructured.Unstructured) bool {
 			if c["type"] == "Ready" && c["status"] == "True" {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isArgoRolloutsDeployer reports whether dep is an ArgoRolloutsDeployer or wraps one.
+func isArgoRolloutsDeployer(dep Deployer) bool {
+	for dep != nil {
+		switch inner := dep.(type) {
+		case *ArgoRolloutsDeployer:
+			return true
+		case *InstrumentedDeployer:
+			dep = inner.Inner
+		case *KEDADeployer:
+			dep = inner.Inner
+		default:
+			return false
 		}
 	}
 	return false

@@ -30,12 +30,21 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 		prevInvoiceReq  capturedInvoiceReq
 		baseReqCaptured bool
 		prevReqCaptured bool
+		baseProfileAuth string
+		prevProfileAuth string
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isPreview := r.Header.Get("x-diverge-env") == "pr-99"
 		switch r.URL.Path {
 		case "/api/v1/profile":
+			mu.Lock()
+			if isPreview {
+				prevProfileAuth = r.Header.Get("Authorization")
+			} else {
+				baseProfileAuth = r.Header.Get("Authorization")
+			}
+			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"id":"u-1","plan":"pro"}`))
@@ -162,4 +171,12 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, filteredRes.IsError)
+	var filteredReport replay.Report
+	require.NoError(t, json.Unmarshal(filteredRes.Content, &filteredReport))
+	assert.True(t, filteredReport.Passed)
+	assert.Equal(t, 1, filteredReport.TotalRequests)
+	mu.Lock()
+	assert.Empty(t, baseProfileAuth)
+	assert.Empty(t, prevProfileAuth)
+	mu.Unlock()
 }

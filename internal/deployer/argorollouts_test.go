@@ -73,6 +73,16 @@ func TestArgoRolloutsDeployer_RegistryAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Len(t, metrics, 1)
+	containers, found, err := unstructured.NestedSlice(metrics[0].(map[string]interface{}), "provider", "job", "spec", "template", "spec", "containers")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, containers, 1)
+	assert.Equal(t, defaultRolloutVerifyImage, containers[0].(map[string]interface{})["image"])
+	assert.Equal(t, []interface{}{"verify", "pr-42", "-n", "default", "--path", "/api/v1/health", "--compare-baseline"}, containers[0].(map[string]interface{})["args"])
+	saName, found, err := unstructured.NestedString(metrics[0].(map[string]interface{}), "provider", "job", "spec", "template", "spec", "serviceAccountName")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, defaultRolloutServiceAccount, saName)
 
 	// Verify Rollout was created with canary strategy and analysis template reference
 	rollout := &unstructured.Unstructured{}
@@ -83,6 +93,10 @@ func TestArgoRolloutsDeployer_RegistryAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "pr-42-checkout", canarySvc)
+	stableSvc, found, err := unstructured.NestedString(rollout.Object, "spec", "strategy", "canary", "stableService")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, "checkout", stableSvc)
 
 	templates, found, err := unstructured.NestedSlice(rollout.Object, "spec", "strategy", "canary", "analysis", "templates")
 	require.NoError(t, err)
@@ -107,11 +121,19 @@ func TestArgoRolloutsDeployer_RegistryAndLifecycle(t *testing.T) {
 	assert.Equal(t, "Healthy", statuses[0].Health)
 	assert.Equal(t, "Canary analysis passed", statuses[0].Message)
 
-	// Switching to replay trace annotation and disabling analysis afterwards cleans up stale template
+	// Switching to replay trace annotation updates args and disabling analysis afterwards cleans up stale template
 	env.Annotations = map[string]string{
 		AnnotationRolloutReplayTrace: "./traces/checkout.jsonl",
 	}
 	require.NoError(t, dep.Deploy(ctx, env))
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: "pr-42-checkout-verify", Namespace: "default"}, tmpl))
+	metrics, found, err = unstructured.NestedSlice(tmpl.Object, "spec", "metrics")
+	require.NoError(t, err)
+	require.True(t, found)
+	containers, found, err = unstructured.NestedSlice(metrics[0].(map[string]interface{}), "provider", "job", "spec", "template", "spec", "containers")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, []interface{}{"replay", "pr-42", "-n", "default", "--from", "./traces/checkout.jsonl"}, containers[0].(map[string]interface{})["args"])
 
 	env.Annotations = nil
 	require.NoError(t, dep.Deploy(ctx, env))
@@ -124,6 +146,13 @@ func TestArgoRolloutsDeployer_RegistryAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, statuses, 1)
 	assert.Equal(t, "Missing", statuses[0].Health)
+
+	// When environment is terminating and Rollout is gone, Status returns empty slice so finalizer completes
+	now := metav1.Now()
+	env.DeletionTimestamp = &now
+	statuses, err = dep.Status(ctx, env)
+	require.NoError(t, err)
+	assert.Empty(t, statuses)
 }
 
 func TestArgoRolloutsDeployer_ConditionsFallbackAndCreateNamespace(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 
 	divergeiov1alpha1 "github.com/divergedev/diverge/api/v1alpha1"
 	"github.com/divergedev/diverge/pkg/doctor"
+	"github.com/divergedev/diverge/pkg/loadtest"
 	"github.com/divergedev/diverge/pkg/replay"
 )
 
@@ -60,6 +61,7 @@ type VerifyEnvironmentResponse struct {
 	Doctor          *doctor.Report    `json:"doctor,omitempty"`
 	ReplayReport    *replay.Report    `json:"replayReport,omitempty"`
 	AutoFixTaskName string            `json:"autoFixTaskName,omitempty"`
+	AutoFixError    string            `json:"autoFixError,omitempty"`
 }
 
 // ReplayEnvironmentRequest is the JSON request body for POST /api/v1/environments/replay.
@@ -88,6 +90,7 @@ type ReplayEnvironmentResponse struct {
 	*replay.Report
 	Markdown        string `json:"markdown,omitempty"`
 	AutoFixTaskName string `json:"autoFixTaskName,omitempty"`
+	AutoFixError    string `json:"autoFixError,omitempty"`
 }
 
 // VerifyReplayHandler serves HTTP endpoints for interactive environment verification and contract replay.
@@ -159,6 +162,12 @@ func (h *VerifyReplayHandler) HandleVerify(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusForbidden, "permission denied")
 			return
 		}
+		if strings.TrimSpace(req.BaseURL) != "" || strings.TrimSpace(req.PreviewURL) != "" {
+			if err := AuthorizeAction(ctx, h.k8sClient, h.auditLogger, "update", ns, "environments"); err != nil {
+				writeJSONError(w, http.StatusForbidden, "permission denied for custom target URL override")
+				return
+			}
+		}
 	}
 
 	var env divergeiov1alpha1.Environment
@@ -171,11 +180,27 @@ func (h *VerifyReplayHandler) HandleVerify(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	allowedHosts := collectAllowedEnvHosts(&env)
 	baseURL, previewURL, headerKey, headerValue, subdomainRouted := resolveServerEnvRouting(&env, req.BaseURL, req.PreviewURL)
+	if err := validateServerTargetHost(baseURL, allowedHosts); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateServerTargetHost(previewURL, allowedHosts); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	paths := req.Paths
 	if len(paths) == 0 {
 		paths = []string{"/"}
+	}
+	for _, p := range paths {
+		trimmed := strings.ToLower(strings.TrimSpace(p))
+		if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") || strings.HasPrefix(trimmed, "//") {
+			writeJSONError(w, http.StatusBadRequest, "verify paths must be relative paths")
+			return
+		}
 	}
 
 	resp := VerifyEnvironmentResponse{
@@ -260,6 +285,7 @@ func (h *VerifyReplayHandler) HandleVerify(w http.ResponseWriter, r *http.Reques
 			HeaderValue:      headerValue,
 			MaxLatency:       maxLatency,
 			FailOnStatusDiff: req.CompareBaseline && baseURL != "",
+			FilterHosts:      allowedHosts,
 			StripAuth:        true,
 			Timeout:          10 * time.Second,
 			HTTPClient:       h.httpClient,
@@ -310,7 +336,10 @@ func (h *VerifyReplayHandler) HandleVerify(w http.ResponseWriter, r *http.Reques
 				fmt.Fprintf(&summary, "- **%s** (%s): %s\n", chk.Name, chk.Status, chk.Message)
 			}
 		}
-		if taskName, fixErr := h.createOrUpdateAutoFixTask(ctx, &env, "verify", summary.String()); fixErr == nil {
+		if taskName, fixErr := h.createOrUpdateAutoFixTask(ctx, &env, "verify", summary.String()); fixErr != nil {
+			h.logger.Warn("auto-fix task creation failed", "environment", envName, "namespace", ns, "error", fixErr)
+			resp.AutoFixError = fixErr.Error()
+		} else {
 			resp.AutoFixTaskName = taskName
 		}
 	}
@@ -365,6 +394,12 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusForbidden, "permission denied")
 			return
 		}
+		if strings.TrimSpace(req.BaseURL) != "" || strings.TrimSpace(req.PreviewURL) != "" {
+			if err := AuthorizeAction(ctx, h.k8sClient, h.auditLogger, "update", ns, "environments"); err != nil {
+				writeJSONError(w, http.StatusForbidden, "permission denied for custom target URL override")
+				return
+			}
+		}
 	}
 
 	var env divergeiov1alpha1.Environment
@@ -395,7 +430,16 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 		entries = []replay.RequestEntry{{ID: "default-root", Method: "GET", Path: "/"}}
 	}
 
+	allowedHosts := collectAllowedEnvHosts(&env)
 	baseURL, previewURL, headerKey, headerValue, subdomainRouted := resolveServerEnvRouting(&env, req.BaseURL, req.PreviewURL)
+	if err := validateServerTargetHost(baseURL, allowedHosts); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateServerTargetHost(previewURL, allowedHosts); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if subdomainRouted && previewURL == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("environment %s uses subdomain routing but has no preview URL", envName))
 		return
@@ -403,6 +447,17 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 	if baseURL == "" && !allServerEntriesAbsolute(entries) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("environment %s requires a baseline URL (provide baseUrl or configure spec.routing.externalUrl)", envName))
 		return
+	}
+	for _, entry := range entries {
+		for _, candidate := range []string{entry.Path, entry.URL} {
+			trimmed := strings.TrimSpace(candidate)
+			if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
+				if err := validateServerTargetHost(trimmed, allowedHosts); err != nil {
+					writeJSONError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
+		}
 	}
 
 	stripAuth := true
@@ -415,6 +470,8 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 		maxLatency = time.Duration(req.MaxLatencyMs) * time.Millisecond
 	}
 
+	effectiveFilterHosts := intersectAllowedHostPatterns(req.FilterHosts, allowedHosts)
+
 	runner := replay.NewRunner(replay.Config{
 		Environment:        envName,
 		Namespace:          ns,
@@ -425,7 +482,7 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 		MaxLatency:         maxLatency,
 		FailOnStatusDiff:   true,
 		FailOnContractDiff: true,
-		FilterHosts:        req.FilterHosts,
+		FilterHosts:        effectiveFilterHosts,
 		StripHeaders:       req.StripHeaders,
 		StripAuth:          stripAuth,
 		RedactQueryParams:  req.RedactQueryParams,
@@ -454,7 +511,10 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 	}
 
 	if !report.Passed && req.AutoFix {
-		if taskName, fixErr := h.createOrUpdateAutoFixTask(ctx, &env, "replay", mdBuf.String()); fixErr == nil {
+		if taskName, fixErr := h.createOrUpdateAutoFixTask(ctx, &env, "replay", mdBuf.String()); fixErr != nil {
+			h.logger.Warn("auto-fix task creation failed", "environment", envName, "namespace", ns, "error", fixErr)
+			out.AutoFixError = fixErr.Error()
+		} else {
 			out.AutoFixTaskName = taskName
 		}
 	}
@@ -545,16 +605,131 @@ func allServerEntriesAbsolute(entries []replay.RequestEntry) bool {
 
 var nonDNSChars = regexp.MustCompile(`[^a-z0-9-]+`)
 
+// collectAllowedEnvHosts derives the set of hostnames and wildcard patterns permitted as server-side verify/replay targets for env.
+func collectAllowedEnvHosts(env *divergeiov1alpha1.Environment) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	addHost := func(h string) {
+		cleaned := strings.ToLower(strings.TrimSpace(h))
+		if cleaned == "" {
+			return
+		}
+		if _, exists := seen[cleaned]; !exists {
+			seen[cleaned] = struct{}{}
+			out = append(out, cleaned)
+		}
+	}
+	addURLHost := func(raw string) {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return
+		}
+		if strings.Contains(trimmed, "{") {
+			replaced := strings.ReplaceAll(strings.ReplaceAll(trimmed, "{env}", "wildcard-env"), "{service}", "wildcard-svc")
+			if parsed, err := url.Parse(replaced); err == nil && parsed.Hostname() != "" {
+				host := strings.ToLower(parsed.Hostname())
+				if idx := strings.IndexByte(host, '.'); idx > 0 {
+					addHost("*" + host[idx:])
+				}
+			}
+			return
+		}
+		if parsed, err := url.Parse(trimmed); err == nil && parsed.Hostname() != "" {
+			addHost(parsed.Hostname())
+		}
+	}
+
+	if env != nil {
+		addURLHost(env.Status.URL)
+		addURLHost(env.Spec.Routing.ExternalURL)
+	}
+	addURLHost(os.Getenv("DIVERGE_BASE_URL"))
+	if allowed := os.Getenv("DIVERGE_ALLOWED_HOSTS"); allowed != "" {
+		for _, part := range strings.Split(allowed, ",") {
+			p := strings.ToLower(strings.TrimSpace(part))
+			if p == "" {
+				continue
+			}
+			addHost(p)
+			if p != "*" && !strings.HasPrefix(p, "*.") {
+				addHost("*." + p)
+			}
+		}
+	}
+	return out
+}
+
+// validateServerTargetHost verifies that rawURL is a valid target URL and that its hostname matches allowedHosts.
+func validateServerTargetHost(rawURL string, allowedHosts []string) error {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil
+	}
+	if err := loadtest.ValidateTargetURL(trimmed); err != nil {
+		return err
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("invalid target URL: %w", err)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, pat := range allowedHosts {
+		if pat == "*" || pat == host {
+			return nil
+		}
+		if strings.HasPrefix(pat, "*.") && strings.HasSuffix(host, pat[1:]) && len(host) > len(pat[1:]) {
+			return nil
+		}
+	}
+	return fmt.Errorf("target URL host %q is not permitted for this environment (must match status.url, spec.routing.externalUrl, DIVERGE_BASE_URL, or DIVERGE_ALLOWED_HOSTS)", parsed.Hostname())
+}
+
+// intersectAllowedHostPatterns restricts user-supplied filterHosts to patterns permitted by allowedHosts, or returns allowedHosts when userFilter is empty.
+func intersectAllowedHostPatterns(userFilter, allowedHosts []string) []string {
+	if len(userFilter) == 0 {
+		return allowedHosts
+	}
+	var kept []string
+	for _, raw := range userFilter {
+		for _, part := range strings.Split(raw, ",") {
+			cand := strings.ToLower(strings.TrimSpace(part))
+			if cand == "" {
+				continue
+			}
+			probeHost := strings.TrimPrefix(cand, "*.")
+			if validateServerTargetHost("https://"+probeHost, allowedHosts) == nil {
+				kept = append(kept, cand)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return allowedHosts
+	}
+	return kept
+}
+
 // createOrUpdateAutoFixTask creates or updates an AgentTask in env.Namespace seeded with the failure summary.
 func (h *VerifyReplayHandler) createOrUpdateAutoFixTask(ctx context.Context, env *divergeiov1alpha1.Environment, failureKind, summary string) (string, error) {
 	ns := env.Namespace
 	if ns == "" {
 		ns = "default"
 	}
-	if h.k8sClient != nil {
-		if err := AuthorizeAction(ctx, h.k8sClient, h.auditLogger, "create", ns, "agenttasks"); err != nil {
-			return "", err
-		}
+
+	proj := strings.TrimSpace(env.Spec.Source.Project)
+	if proj == "" {
+		return "", fmt.Errorf("environment %s has no spec.source.project; cannot determine repository for auto-fix", env.Name)
+	}
+	var repoURL string
+	if strings.HasPrefix(proj, "http://") || strings.HasPrefix(proj, "https://") || strings.HasPrefix(proj, "git@") {
+		repoURL = proj
+	} else if strings.EqualFold(env.Spec.Source.Provider, "gitlab") {
+		repoURL = "https://gitlab.com/" + proj
+	} else {
+		repoURL = "https://github.com/" + proj
+	}
+	branch := strings.TrimSpace(env.Spec.Source.Branch)
+	if branch == "" {
+		branch = env.Name
 	}
 
 	rawName := strings.ToLower(fmt.Sprintf("autofix-%s-%s", failureKind, env.Name))
@@ -563,26 +738,16 @@ func (h *VerifyReplayHandler) createOrUpdateAutoFixTask(ctx context.Context, env
 		taskName = strings.TrimRight(taskName[:50], "-")
 	}
 
-	repoURL := fmt.Sprintf("https://github.com/divergedev/%s", env.Name)
-	if proj := strings.TrimSpace(env.Spec.Source.Project); proj != "" {
-		if strings.HasPrefix(proj, "http://") || strings.HasPrefix(proj, "https://") || strings.HasPrefix(proj, "git@") {
-			repoURL = proj
-		} else if strings.EqualFold(env.Spec.Source.Provider, "gitlab") {
-			repoURL = "https://gitlab.com/" + proj
-		} else {
-			repoURL = "https://github.com/" + proj
-		}
-	}
-	branch := strings.TrimSpace(env.Spec.Source.Branch)
-	if branch == "" {
-		branch = env.Name
-	}
-
 	objective := fmt.Sprintf("Fix %s regression detected on preview environment %s:\n\n%s", failureKind, env.Name, strings.TrimSpace(summary))
 
 	var existing divergeiov1alpha1.AgentTask
 	err := h.client.Get(ctx, client.ObjectKey{Name: taskName, Namespace: ns}, &existing)
 	if err == nil {
+		if h.k8sClient != nil {
+			if authErr := AuthorizeAction(ctx, h.k8sClient, h.auditLogger, "update", ns, "agenttasks"); authErr != nil {
+				return "", authErr
+			}
+		}
 		if existing.Annotations == nil {
 			existing.Annotations = make(map[string]string)
 		}
@@ -596,6 +761,12 @@ func (h *VerifyReplayHandler) createOrUpdateAutoFixTask(ctx context.Context, env
 	}
 	if !apierrors.IsNotFound(err) {
 		return "", err
+	}
+
+	if h.k8sClient != nil {
+		if authErr := AuthorizeAction(ctx, h.k8sClient, h.auditLogger, "create", ns, "agenttasks"); authErr != nil {
+			return "", authErr
+		}
 	}
 
 	task := &divergeiov1alpha1.AgentTask{

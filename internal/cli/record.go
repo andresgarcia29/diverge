@@ -48,14 +48,17 @@ for 'diverge replay'.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := strings.TrimSpace(opts.targetURL)
+			var headerKey, headerVal string
 			if target == "" && len(args) == 1 {
 				envName := args[0]
 				cOpts := &curlOptions{}
-				resolvedURL, _, _, err := resolveCurlRouting(cmd, app, envName, "/", cOpts)
+				resolvedURL, hk, hv, err := resolveCurlRouting(cmd, app, envName, "/", cOpts)
 				if err != nil {
 					return fmt.Errorf("resolve target URL for environment %s: %w", envName, err)
 				}
 				target = resolvedURL
+				headerKey = hk
+				headerVal = hv
 			}
 			if target == "" {
 				return fmt.Errorf("--target <upstream-url> (or an <env-name> argument) is required")
@@ -89,6 +92,8 @@ for 'diverge replay'.`,
 			if err != nil {
 				return err
 			}
+			proxy.HeaderKey = headerKey
+			proxy.HeaderValue = headerVal
 			proxy.MaxRequests = opts.maxRequests
 
 			runCtx := cmd.Context()

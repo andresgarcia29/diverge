@@ -314,7 +314,7 @@ func triggerCLIAutoFixTask(ctx context.Context, app *App, envName, ns, failureKi
 		ns = "default"
 	}
 
-	repoURL := fmt.Sprintf("https://github.com/divergedev/%s", envName)
+	repoURL := ""
 	branch := envName
 
 	var env divergeiov1alpha1.Environment
@@ -327,6 +327,9 @@ func triggerCLIAutoFixTask(ctx context.Context, app *App, envName, ns, failureKi
 		} else if pgErr2 := c.Get(ctx, client.ObjectKey{Name: envName}, &pg); pgErr2 == nil {
 			repoURL, branch = resolveSourceRepoAndBranch(pg.Spec.Source, envName)
 		}
+	}
+	if repoURL == "" {
+		return "", fmt.Errorf("cannot resolve source repository for %s; set spec.source.project", envName)
 	}
 
 	taskName := sanitizeDNSLabel(fmt.Sprintf("autofix-%s-%s", failureKind, envName))
@@ -387,7 +390,7 @@ func resolveSourceRepoAndBranch(src divergeiov1alpha1.EnvironmentSource, fallbac
 	}
 	project := strings.TrimSpace(src.Project)
 	if project == "" {
-		return fmt.Sprintf("https://github.com/divergedev/%s", fallbackEnv), branch
+		return "", branch
 	}
 	if strings.HasPrefix(project, "http://") || strings.HasPrefix(project, "https://") || strings.HasPrefix(project, "git@") {
 		return project, branch

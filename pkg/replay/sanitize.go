@@ -116,6 +116,7 @@ func SanitizeEntry(entry RequestEntry, opts SanitizeOptions) RequestEntry {
 
 // SanitizeURLString removes userinfo (when stripAuth is true) and redacts sensitive query parameters
 // in rawURL (supporting both absolute URLs and relative paths with query strings).
+// If rawURL cannot be parsed by net/url, it fails closed by stripping userinfo and redacting query segments directly.
 func SanitizeURLString(rawURL string, stripAuth bool, extraQueryParams []string) string {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
@@ -123,10 +124,42 @@ func SanitizeURLString(rawURL string, stripAuth bool, extraQueryParams []string)
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		return trimmed
+		return sanitizeFallbackURLString(trimmed, stripAuth, extraQueryParams)
 	}
 	sanitizeURLObject(parsed, stripAuth, extraQueryParams)
 	return parsed.String()
+}
+
+// sanitizeFallbackURLString strips userinfo and redacts sensitive query segments when url.Parse fails on malformed input.
+func sanitizeFallbackURLString(trimmed string, stripAuth bool, extraQueryParams []string) string {
+	beforeFrag, _, _ := strings.Cut(trimmed, "#")
+	beforeQuery, rawQuery, hasQuery := strings.Cut(beforeFrag, "?")
+	if stripAuth {
+		if scheme, rest, hasScheme := strings.Cut(beforeQuery, "://"); hasScheme {
+			slashIdx := strings.IndexByte(rest, '/')
+			authority := rest
+			pathPart := ""
+			if slashIdx >= 0 {
+				authority = rest[:slashIdx]
+				pathPart = rest[slashIdx:]
+			}
+			if atIdx := strings.LastIndexByte(authority, '@'); atIdx >= 0 {
+				authority = authority[atIdx+1:]
+			}
+			beforeQuery = scheme + "://" + authority + pathPart
+		} else if atIdx := strings.LastIndexByte(beforeQuery, '@'); atIdx >= 0 {
+			beforeQuery = beforeQuery[atIdx+1:]
+		}
+	}
+	if !hasQuery || rawQuery == "" {
+		return beforeQuery
+	}
+	redactSet := buildQueryRedactSet(stripAuth, extraQueryParams)
+	if len(redactSet) == 0 {
+		return beforeQuery + "?" + rawQuery
+	}
+	redactedQuery, _ := redactRawQuerySegments(rawQuery, redactSet, stripAuth)
+	return beforeQuery + "?" + redactedQuery
 }
 
 // sanitizeURLObject mutates parsed in place to strip userinfo and redact matching query parameters.
@@ -144,21 +177,59 @@ func sanitizeURLObject(parsed *url.URL, stripAuth bool, extraQueryParams []strin
 	if len(redactSet) == 0 {
 		return
 	}
-	q, err := url.ParseQuery(parsed.RawQuery)
-	if err != nil {
-		return
+	if redacted, modified := redactRawQuerySegments(parsed.RawQuery, redactSet, stripAuth); modified {
+		parsed.RawQuery = redacted
 	}
+}
+
+// redactRawQuerySegments scans a raw query string split on '&' or ';' without failing open on malformed escapes.
+func redactRawQuerySegments(rawQuery string, redactSet map[string]struct{}, failClosedOnMalformedKey bool) (string, bool) {
+	if rawQuery == "" || len(redactSet) == 0 {
+		return rawQuery, false
+	}
+	var out strings.Builder
+	out.Grow(len(rawQuery))
 	modified := false
-	for k := range q {
-		lower := strings.ToLower(strings.TrimSpace(k))
-		if _, match := redactSet[lower]; match {
-			q.Set(k, RedactedPlaceholder)
-			modified = true
+	start := 0
+	for i := 0; i <= len(rawQuery); i++ {
+		isEnd := i == len(rawQuery)
+		isSep := !isEnd && (rawQuery[i] == '&' || rawQuery[i] == ';')
+		if !isEnd && !isSep {
+			continue
 		}
+		seg := rawQuery[start:i]
+		if seg != "" {
+			keyPart, _, hasEq := strings.Cut(seg, "=")
+			unescapedKey, unescapeErr := url.QueryUnescape(keyPart)
+			if unescapeErr != nil {
+				unescapedKey = keyPart
+			}
+			lowerKey := strings.ToLower(strings.TrimSpace(unescapedKey))
+			_, match := redactSet[lowerKey]
+			if match || (failClosedOnMalformedKey && unescapeErr != nil) {
+				safeKey := url.QueryEscape(strings.TrimSpace(unescapedKey))
+				if unescapeErr != nil {
+					safeKey = "redacted_param"
+				}
+				out.WriteString(safeKey)
+				out.WriteByte('=')
+				out.WriteString(url.QueryEscape(RedactedPlaceholder))
+				modified = true
+			} else if hasEq {
+				out.WriteString(seg)
+			} else {
+				out.WriteString(seg)
+			}
+		}
+		if isSep {
+			if rawQuery[i] == ';' {
+				modified = true
+			}
+			out.WriteByte('&')
+		}
+		start = i + 1
 	}
-	if modified {
-		parsed.RawQuery = q.Encode()
-	}
+	return out.String(), modified
 }
 
 // buildQueryRedactSet constructs a lowercase lookup set of query parameter names to redact.
@@ -286,6 +357,8 @@ func WriteJSONL(w io.Writer, entries []RequestEntry) error {
 // RecorderProxy is an HTTP reverse proxy that captures and sanitizes live traffic into RequestEntry items.
 type RecorderProxy struct {
 	TargetURL   *url.URL
+	HeaderKey   string
+	HeaderValue string
 	Sanitize    SanitizeOptions
 	MaxRequests int
 	HTTPClient  *http.Client
@@ -306,10 +379,14 @@ func NewRecorderProxy(targetURL string, out io.Writer, opts SanitizeOptions) (*R
 	if err != nil {
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
+	client := secureHTTPClient(nil, 30*time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &RecorderProxy{
 		TargetURL:  parsed,
 		Sanitize:   opts,
-		HTTPClient: secureHTTPClient(nil, 30*time.Second),
+		HTTPClient: client,
 		out:        out,
 	}, nil
 }
@@ -365,12 +442,19 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.Header.Add(k, v)
 		}
 	}
-
-	client := p.HTTPClient
-	if client == nil {
-		client = secureHTTPClient(nil, 30*time.Second)
+	if hk := strings.TrimSpace(p.HeaderKey); hk != "" && p.HeaderValue != "" && outReq.Header.Get(hk) == "" {
+		outReq.Header.Set(hk, p.HeaderValue)
 	}
-	resp, err := client.Do(outReq)
+
+	baseClient := p.HTTPClient
+	if baseClient == nil {
+		baseClient = secureHTTPClient(nil, 30*time.Second)
+	}
+	noRedirectClient := *baseClient
+	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := noRedirectClient.Do(outReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream request failed: %v", err), http.StatusBadGateway)
 		return
@@ -425,7 +509,11 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			entry.Body = string(reqBody)
 		}
 	}
-	sanitized := SanitizeEntry(entry, p.Sanitize)
+	sanOpts := p.Sanitize
+	if hk := strings.TrimSpace(p.HeaderKey); hk != "" {
+		sanOpts.StripHeaders = append(append([]string(nil), p.Sanitize.StripHeaders...), hk)
+	}
+	sanitized := SanitizeEntry(entry, sanOpts)
 	p.entries = append(p.entries, sanitized)
 	if p.out != nil {
 		_ = WriteJSONL(p.out, []RequestEntry{sanitized})

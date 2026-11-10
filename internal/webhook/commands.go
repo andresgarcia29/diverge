@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"regexp"
@@ -618,15 +620,24 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 
 	if subdomainRouted && !canProbeHTTP {
 		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (subdomain-routed environment requires an explicit baseline URL via `spec.routing.externalUrl` or `DIVERGE_BASE_URL`)\n")
+		if !docHealthy && autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 	if baseURL == "" {
 		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (preview URL not yet assigned in `status.url`)\n")
+		if !docHealthy && autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 
 	if err != nil {
 		fmt.Fprintf(&b, "- **HTTP Probe**: ❌ Error (`%v`)\n", err)
+		if autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 
@@ -638,10 +649,7 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 	}
 
 	if !overallPassed && autoFix {
-		taskName, fixErr := spawnWebhookAutoFixTask(ctx, c, ns, envName, "verify", b.String(), repoURL, branch, prNumber)
-		if fixErr == nil && taskName != "" {
-			fmt.Fprintf(&b, "\n🤖 **Self-Healing Triggered**: Spawned/updated autonomous agent task `%s` to investigate and fix this failure.\n", taskName)
-		}
+		appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
 	}
 	return b.String(), nil
 }
@@ -694,12 +702,22 @@ func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths
 		return "", err
 	}
 	if !report.Passed && autoFix {
-		taskName, fixErr := spawnWebhookAutoFixTask(ctx, c, ns, envName, "replay", mdBuf.String(), repoURL, branch, prNumber)
-		if fixErr == nil && taskName != "" {
-			fmt.Fprintf(&mdBuf, "\n🤖 **Self-Healing Triggered**: Spawned/updated autonomous agent task `%s` to investigate and fix this regression.\n", taskName)
-		}
+		appendWebhookAutoFixSection(ctx, c, ns, envName, "replay", mdBuf.String(), &mdBuf, repoURL, branch, prNumber)
 	}
 	return mdBuf.String(), nil
+}
+
+// appendWebhookAutoFixSection spawns or updates an autonomous AgentTask and appends the outcome to out.
+func appendWebhookAutoFixSection(ctx context.Context, c client.Client, ns, envName, failureKind, summary string, out io.Writer, repoURL, branch string, prNumber int) {
+	taskName, fixErr := spawnWebhookAutoFixTask(ctx, c, ns, envName, failureKind, summary, repoURL, branch, prNumber)
+	if fixErr != nil {
+		slog.Warn("webhook auto-fix task creation failed", "environment", envName, "namespace", ns, "failureKind", failureKind, "error", fixErr)
+		_, _ = fmt.Fprintf(out, "\n⚠️ **Self-Healing Failed**: Could not create or update the autonomous agent task. Check the Diverge webhook logs.\n")
+		return
+	}
+	if taskName != "" {
+		_, _ = fmt.Fprintf(out, "\n🤖 **Self-Healing Triggered**: Spawned/updated autonomous agent task `%s` to investigate and fix this failure.\n", taskName)
+	}
 }
 
 // spawnWebhookAutoFixTask creates or updates an AgentTask seeded with a verification or replay failure summary.

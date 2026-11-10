@@ -120,7 +120,19 @@ func TestVerifyReplayHandler_VerifyAndReplayWithAutoFix(t *testing.T) {
 	assert.Equal(t, "https://github.com/acme/orders", task.Spec.Repository.URL)
 	assert.Contains(t, task.Spec.Objective, "currency")
 
-	// 3. Rejects GET method with 405
+	// 3. Rejects unauthorized target URL host (SSRF defense)
+	ssrfPayload, err := json.Marshal(VerifyEnvironmentRequest{
+		Name:       "pr-42",
+		Namespace:  "default",
+		PreviewURL: "https://internal-db.corp.local:5432",
+	})
+	require.NoError(t, err)
+	reqSSRF := httptest.NewRequest(http.MethodPost, "/api/v1/environments/verify", bytes.NewReader(ssrfPayload))
+	recSSRF := httptest.NewRecorder()
+	handler.HandleVerify(recSSRF, reqSSRF)
+	assert.Equal(t, http.StatusBadRequest, recSSRF.Code)
+
+	// 4. Rejects GET method with 405
 	reqGet := httptest.NewRequest(http.MethodGet, "/api/v1/environments/verify", nil)
 	recGet := httptest.NewRecorder()
 	handler.HandleVerify(recGet, reqGet)

@@ -34,6 +34,21 @@ func TestSanitizeURLString(t *testing.T) {
 	assert.Contains(t, gotCustomOnly, "token=keep-me")
 	assert.NotContains(t, gotCustomOnly, "123-45-6789")
 	assert.Contains(t, gotCustomOnly, "ssn=%5BREDACTED%5D")
+
+	// Semicolon query separators and malformed percent escapes fail closed
+	gotSemicolon := SanitizeURLString("/v1/items?token=semi-secret;keep=1&api_key=bad%ZZescape", true, nil)
+	assert.NotContains(t, gotSemicolon, "semi-secret")
+	assert.NotContains(t, gotSemicolon, "bad%ZZescape")
+	assert.Contains(t, gotSemicolon, "keep=1")
+	assert.Contains(t, gotSemicolon, "token=%5BREDACTED%5D")
+	assert.Contains(t, gotSemicolon, "api_key=%5BREDACTED%5D")
+
+	// Fallback when url.Parse itself fails on control char or malformed URL
+	gotMalformedURL := SanitizeURLString("https://bob:topsecret@api.example.com/\x00path?password=leaked&ok=true", true, nil)
+	assert.NotContains(t, gotMalformedURL, "bob:topsecret")
+	assert.NotContains(t, gotMalformedURL, "leaked")
+	assert.Contains(t, gotMalformedURL, "password=%5BREDACTED%5D")
+	assert.Contains(t, gotMalformedURL, "ok=true")
 }
 
 func TestRedactJSONBodyFields(t *testing.T) {

@@ -44,6 +44,14 @@ spec:
       description: "Strip recorded Authorization, Cookie, X-Api-Key headers and auth query tokens during replay (true/false)"
       type: string
       default: "true"
+    diverge_replay_redact_query:
+      description: "Optional comma-separated query parameter names to redact during diverge replay"
+      type: string
+      default: ""
+    diverge_replay_redact_body_fields:
+      description: "Optional comma-separated JSON request body field paths to redact during diverge replay"
+      type: string
+      default: ""
     diverge_replay_filter_hosts:
       description: "Optional comma-separated host patterns to include during diverge replay"
       type: string
@@ -96,6 +104,8 @@ diverge:preview:
     DIVERGE_VERIFY_MAX_LATENCY: $[[ inputs.diverge_verify_max_latency ]]
     DIVERGE_REPLAY_FROM: $[[ inputs.diverge_replay_from ]]
     DIVERGE_REPLAY_STRIP_AUTH: $[[ inputs.diverge_replay_strip_auth ]]
+    DIVERGE_REPLAY_REDACT_QUERY: $[[ inputs.diverge_replay_redact_query ]]
+    DIVERGE_REPLAY_REDACT_BODY_FIELDS: $[[ inputs.diverge_replay_redact_body_fields ]]
     DIVERGE_REPLAY_FILTER_HOSTS: $[[ inputs.diverge_replay_filter_hosts ]]
     DIVERGE_REPLAY_IGNORE_FIELDS: $[[ inputs.diverge_replay_ignore_fields ]]
     DIVERGE_REPLAY_MAX_LATENCY: $[[ inputs.diverge_replay_max_latency ]]
@@ -256,6 +266,12 @@ diverge:preview:
         fi
         if [ -n "${DIVERGE_REPLAY_IGNORE_FIELDS:-}" ]; then
           set -- "$@" --ignore-field "${DIVERGE_REPLAY_IGNORE_FIELDS}"
+        fi
+        if [ -n "${DIVERGE_REPLAY_REDACT_QUERY:-}" ]; then
+          set -- "$@" --redact-query "${DIVERGE_REPLAY_REDACT_QUERY}"
+        fi
+        if [ -n "${DIVERGE_REPLAY_REDACT_BODY_FIELDS:-}" ]; then
+          set -- "$@" --redact-body-field "${DIVERGE_REPLAY_REDACT_BODY_FIELDS}"
         fi
         if [ "${DIVERGE_AUTO_FIX:-false}" = "true" ]; then
           set -- "$@" --auto-fix

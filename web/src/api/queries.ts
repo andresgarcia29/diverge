@@ -353,6 +353,7 @@ export interface ReplayEnvironmentResponse {
   results: ReplayEntryResult[]
   markdown?: string
   autoFixTaskName?: string
+  autoFixError?: string
 }
 
 export interface VerifyEnvironmentResponse {
@@ -365,6 +366,7 @@ export interface VerifyEnvironmentResponse {
   checks: VerifyCheckItem[]
   replayReport?: ReplayEnvironmentResponse
   autoFixTaskName?: string
+  autoFixError?: string
 }
 
 export interface ReplayEnvironmentRequest {
@@ -406,6 +408,16 @@ async function postJSONEndpoint<TReq, TRes>(url: string, payload: TReq): Promise
   })
   if (!res.ok) {
     const errText = await res.text()
+    try {
+      const parsed = JSON.parse(errText) as { error?: unknown }
+      if (typeof parsed.error === 'string' && parsed.error.trim()) {
+        throw new Error(parsed.error.trim())
+      }
+    } catch (parseErr) {
+      if (parseErr instanceof Error && !(parseErr instanceof SyntaxError)) {
+        throw parseErr
+      }
+    }
     throw new Error(errText.trim() || `Request failed with status ${res.status}`)
   }
   return (await res.json()) as TRes

@@ -145,7 +145,7 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 						Index:          idx,
 						ID:             entries[idx].ID,
 						Method:         entries[idx].Method,
-						Path:           entries[idx].Path,
+						Path:           SanitizeURLString(entries[idx].Path, r.Config.StripAuth, r.Config.RedactQueryParams),
 						Passed:         false,
 						FailureReasons: []string{ctx.Err().Error()},
 					}
@@ -200,11 +200,13 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 }
 
 type requestSanitizePolicy struct {
-	routingKey        string
-	routingVal        string
-	stripAuth         bool
-	stripHeaders      []string
-	redactQueryParams []string
+	routingKey           string
+	routingVal           string
+	stripAuth            bool
+	stripHeaders         []string
+	redactQueryParams    []string
+	noFollowRedirect     bool
+	allowedRedirectHosts []string
 }
 
 type sanitizePolicyContextKey struct{}
@@ -313,12 +315,18 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 
 	origRedirect := out.CheckRedirect
 	out.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if err := loadtest.ValidateTargetURL(req.URL.String()); err != nil {
-			return fmt.Errorf("redirect target prohibited: %w", err)
-		}
 		if policy, ok := req.Context().Value(sanitizePolicyContextKey{}).(requestSanitizePolicy); ok {
+			if policy.noFollowRedirect {
+				return http.ErrUseLastResponse
+			}
+			if len(policy.allowedRedirectHosts) > 0 && !hostMatchesFilter(strings.ToLower(req.URL.Hostname()), normalizeHostPatterns(policy.allowedRedirectHosts)) {
+				return fmt.Errorf("redirect target host %q not in allowed hosts", req.URL.Hostname())
+			}
 			sanitizeRequestHeaders(req, policy.routingKey, policy.routingVal, policy.stripAuth, policy.stripHeaders)
 			sanitizeURLObject(req.URL, policy.stripAuth, policy.redactQueryParams)
+		}
+		if err := loadtest.ValidateTargetURL(req.URL.String()); err != nil {
+			return fmt.Errorf("redirect target prohibited: %w", err)
 		}
 		if origRedirect != nil {
 			return origRedirect(req, via)
@@ -368,7 +376,8 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		return res
 	}
 
-	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams)
+	noFollowRedirect := entry.ExpectStatus >= 300 && entry.ExpectStatus < 400
+	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -377,7 +386,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams)
+	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -514,12 +523,8 @@ func ResolveEntryURL(baseURL, entryPath string) (string, error) {
 	return finalURL, nil
 }
 
-// FilterEntriesByHost retains relative-path entries and absolute-URL entries whose hostname matches one of allowedHosts
-// (supporting exact hostname matches like "api.example.com" and wildcard subdomain patterns like "*.example.com").
-func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []RequestEntry {
-	if len(allowedHosts) == 0 {
-		return entries
-	}
+// normalizeHostPatterns splits comma-separated host patterns and normalizes them to lowercase.
+func normalizeHostPatterns(allowedHosts []string) []string {
 	var normalized []string
 	for _, h := range allowedHosts {
 		for _, part := range strings.Split(h, ",") {
@@ -529,6 +534,16 @@ func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []Reques
 			}
 		}
 	}
+	return normalized
+}
+
+// FilterEntriesByHost retains relative-path entries and absolute-URL entries whose hostname matches one of allowedHosts
+// (supporting exact hostname matches like "api.example.com" and wildcard subdomain patterns like "*.example.com").
+func FilterEntriesByHost(entries []RequestEntry, allowedHosts []string) []RequestEntry {
+	if len(allowedHosts) == 0 {
+		return entries
+	}
+	normalized := normalizeHostPatterns(allowedHosts)
 	if len(normalized) == 0 {
 		return []RequestEntry{}
 	}
@@ -607,13 +622,15 @@ func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, st
 }
 
 // executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string, redactQueryParams []string) (int, string, string, []byte, time.Duration, error) {
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string, redactQueryParams []string, noFollowRedirect bool, allowedRedirectHosts []string) (int, string, string, []byte, time.Duration, error) {
 	policy := requestSanitizePolicy{
-		routingKey:        routingKey,
-		routingVal:        routingVal,
-		stripAuth:         stripAuth,
-		stripHeaders:      stripHeaders,
-		redactQueryParams: redactQueryParams,
+		routingKey:           routingKey,
+		routingVal:           routingVal,
+		stripAuth:            stripAuth,
+		stripHeaders:         stripHeaders,
+		redactQueryParams:    redactQueryParams,
+		noFollowRedirect:     noFollowRedirect,
+		allowedRedirectHosts: allowedRedirectHosts,
 	}
 	reqCtx := context.WithValue(ctx, sanitizePolicyContextKey{}, policy)
 	var cancel context.CancelFunc

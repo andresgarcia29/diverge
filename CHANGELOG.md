@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.22.0] - 2026-11-09
+
+### 🚀 Highlights & New Features
+
+#### 🎙️ Traffic Recording Proxy (`diverge record`) & Deep Trace Sanitization (`diverge replay sanitize`)
+- **Live Reverse-Proxy Traffic Recorder (`pkg/replay/sanitize.go`, `internal/cli/record.go`) (#331)**: Added `diverge record [env-name] --target <upstream-url> --output <trace.jsonl>` (`--listen`, `--max-requests`, `--duration`, `--strip-auth`, `--strip-header`, `--redact-query`, `--redact-body-field`) to proxy live HTTP, ConnectRPC, gRPC-Web, and binary Protobuf-over-HTTP traffic (preserving upstream `3xx` redirects and injecting preview routing headers when targeting `<env-name>`) while writing deterministic `.jsonl` traces with default auth header/token stripping and opt-in `--redact-body-field` JSON body scrubbing.
+- **Standalone Trace Sanitizer & Query/Body Redaction (`pkg/replay/sanitize.go`, `pkg/replay/runner.go`, `internal/cli/replay.go`, `internal/cli/mcp_replay.go`) (#331)**: Added `diverge replay sanitize --from <trace.har|trace.jsonl> --output <clean.jsonl>`, URL userinfo and default auth query token stripping (`token`, `access_token`, `id_token`, `refresh_token`, `api_key`, `apikey`, `key`, `secret`, `client_secret`, `password`, `sig`, `signature`, `x-amz-signature`, `x-amz-security-token`, `x-goog-signature`, including fail-closed redaction of malformed `%`-escaped query keys when `--strip-auth` is enabled), custom query parameter redaction (`--redact-query` / `redact_query_params` across `&` and `;` separators), and recursive JSON request body field redaction (`--redact-body-field` / `redact_body_fields`).
+- **Property-Based Sanitization Invariants (`pkg/replay/property_test.go`) (#331)**: Added `pgregory.net/rapid` property tests verifying URL userinfo/query redaction and recursive JSON body field scrubbing invariants.
+
+#### 🤖 Closed-Loop Self-Healing (`--auto-fix` / `--fix` → `AgentTask`)
+- **Automatic `AgentTask` Creation & Steering on Verification/Replay Failure (`internal/cli/replay.go`, `internal/cli/verify.go`, `internal/webhook/commands.go`, `action.yml`, `scripts/ci-preview.sh`) (#331)**: Added `--auto-fix` to `diverge verify` and `diverge replay`, `auto-fix: "true"` to the GitHub Action, `diverge_auto_fix: "true"` to the GitLab CI component, and `--fix` / `--auto-fix` to `/diverge verify` and `/diverge replay` PR/MR slash commands to automatically create or steer an autonomous `AgentTask` (`autofix-verify-<env>` / `autofix-replay-<env>`) seeded with the Markdown failure scorecard.
+
+#### 🖥️ Web Dashboard **Verify & Replay** Tab & Control-Plane REST Endpoints
+- **Server Verification & Replay API (`internal/server/verify_replay.go`, `cmd/server/main.go`) (#331)**: Added `POST /api/v1/environments/verify` and `POST /api/v1/environments/replay` on `diverge-server` with Kubernetes RBAC checks (`get`/`update` on `environments`, `create`/`update` on `agenttasks`), environment-scoped target/redirect host allowlisting (`status.url`, `spec.routing.externalUrl`, `DIVERGE_BASE_URL`, `DIVERGE_ALLOWED_HOSTS`), and optional `autoFix` `AgentTask` spawning.
+- **Interactive Dashboard UI (`web/src/pages/VerifyReplayPage.tsx`, `web/src/api/queries.ts`) (#331)**: Added a first-class **Verify & Replay** page (`/verify-replay`) in the React Web Dashboard to run health/latency probes and `.jsonl`/`.har` contract replay with inline JSON/Protobuf diff tables and one-click self-healing `AgentTask` links.
+
+#### 🦊 GitLab CI Component Parity & Subdomain-Routed Webhook Replay
+- **Full GitLab CI Component Parity (`ci/gitlab/.gitlab-ci-component.yml`, `templates/preview/template.yml`) (#331)**: Added `diverge_verify`, `diverge_verify_path`, `diverge_verify_max_latency`, `diverge_replay_strip_auth` (`"true"` by default), `diverge_replay_redact_query`, `diverge_replay_redact_body_fields`, `diverge_replay_filter_hosts`, `diverge_replay_ignore_fields`, `diverge_replay_max_latency`, `diverge_replay_compare_values`, `diverge_replay_fail_on_extra_fields`, and `diverge_auto_fix` inputs to the GitLab CI component.
+- **Subdomain-Routed `/diverge verify` & `/diverge replay` (`internal/webhook/commands.go`) (#331)**: Enabled `/diverge verify` and `/diverge replay` PR/MR slash commands for subdomain-routed preview environments when a baseline URL is configured via `spec.routing.externalUrl` or `DIVERGE_BASE_URL`.
+
+---
+
 ## [v0.21.0] - 2026-11-08
 
 ### 🚀 Highlights & New Features

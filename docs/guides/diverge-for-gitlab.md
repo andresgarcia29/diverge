@@ -45,16 +45,27 @@ notifierProvider: gitlab
 *Note: The Helm chart does not currently natively map the secrets to the required environment variables. You will need to patch the `diverge-controller-manager` deployment to include `DIVERGE_NOTIFIER_TOKEN` and `DIVERGE_WEBHOOK_SECRET` in its `env` list.*
 
 ## 5. Single Service Setup
-For single-service repositories, the `Environment` CRD is deployed when a Merge Request webhook event is received. Ensure your `.diverge.yaml` maps the repository correctly:
+For single-service repositories, the `Environment` CRD is deployed when a Merge Request webhook event is received. Diverge reads `.diverge.yaml` from the MR's source branch through the GitLab API (with `DIVERGE_NOTIFIER_TOKEN`) and deploys one preview pod for the service:
 ```yaml
-version: "1"
-services:
-  frontend:
-    paths:
-      - apps/web/**
-    image:
-      repository: registry.example.com/frontend
+apiVersion: divergedev.com/v1alpha1
+kind: ServicePreview
+metadata:
+  name: frontend
+spec:
+  serviceName: frontend        # required: the baseline Service to shadow
+  port: 8080                   # default 8080
+  image:
+    repository: registry.example.com/team/frontend   # no tag or digest
+  routing:
+    headerKey: x-diverge-env
+    parentRef: diverge-gateway
+  container:
+    env:
+      - name: LOG_LEVEL
+        value: debug
 ```
+The preview image is `<spec.image.repository>:<first 12 characters of the MR's last commit SHA>`, so CI must push that tag for merge request pipelines (in GitLab CI, `${CI_COMMIT_SHA:0:12}`). Without `spec.image.repository`, the repository defaults to the project path (`group/project`), which resolves against Docker Hub.
+
 When an MR is opened or updated, Diverge creates an `Environment` matching the MR ID and routes header-based traffic specifically to the updated service.
 
 ## 6. Multi-Service Setup (PreviewGroups)

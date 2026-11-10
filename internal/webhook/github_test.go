@@ -263,6 +263,9 @@ spec:
 	if len(env.Spec.Deploy.ChangedServices) != 1 || env.Spec.Deploy.ChangedServices[0] != "github-api" {
 		t.Errorf("Expected ChangedServices [github-api], got %v", env.Spec.Deploy.ChangedServices)
 	}
+	if want := "divergedev/demo-payments-api:abc123def456"; env.Spec.ServiceConfig.Image != want {
+		t.Errorf("Expected Image %s, got %s", want, env.Spec.ServiceConfig.Image)
+	}
 }
 
 func TestGitHubWebhookDeletesEnvironment(t *testing.T) {

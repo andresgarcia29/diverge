@@ -247,6 +247,72 @@ spec:
 	if len(env.Spec.Deploy.ChangedServices) != 1 || env.Spec.Deploy.ChangedServices[0] != "payment-api" {
 		t.Errorf("Expected ChangedServices [payment-api], got %v", env.Spec.Deploy.ChangedServices)
 	}
+	if env.Spec.ServiceConfig.Image != "team/payments-api:abc123def456" {
+		t.Errorf("Expected Image team/payments-api:abc123def456, got %s", env.Spec.ServiceConfig.Image)
+	}
+}
+
+func TestGitLabWebhookWithConfigFetcherImageRepository(t *testing.T) {
+	fakeK8s := newTestClient()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// editorconfig-checker-disable
+		_, _ = w.Write([]byte(`apiVersion: divergedev.com/v1alpha1
+kind: ServicePreview
+metadata:
+  name: payment-api
+spec:
+  serviceName: payment-api
+  image:
+    repository: registry.example.com/previews/payment-api
+`))
+		// editorconfig-checker-enable
+	}))
+	defer ts.Close()
+
+	handler := &GitLabWebhookHandler{
+		Client: fakeK8s,
+		Config: WebhookConfig{SecretToken: "secret"},
+		ConfigFetcher: &GitLabConfigFetcher{
+			BaseURL:    ts.URL,
+			Token:      "secret-token",
+			HTTPClient: ts.Client(),
+		},
+		DefaultNS: "preview",
+	}
+
+	body := `{
+		"object_kind": "merge_request",
+		"object_attributes": {
+			"iid": 42,
+			"action": "open",
+			"source_branch": "feat/new-payments",
+			"last_commit": {"id": "abc123def456789"}
+		},
+		"project": {"path_with_namespace": "team/payments-api"}
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+	req.Header.Set("X-Gitlab-Token", "secret")
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", rr.Code)
+	}
+
+	env := &divergeiov1alpha1.Environment{}
+	if err := fakeK8s.Get(context.Background(), client.ObjectKey{Name: "mr-0d7c4cc4-42", Namespace: "preview"}, env); err != nil {
+		t.Fatalf("Expected Environment CR to be created, got %v", err)
+	}
+	if env.Spec.ServiceConfig == nil {
+		t.Fatalf("Expected ServiceConfig to be populated")
+	}
+	if want := "registry.example.com/previews/payment-api:abc123def456"; env.Spec.ServiceConfig.Image != want {
+		t.Errorf("Expected Image %s, got %s", want, env.Spec.ServiceConfig.Image)
+	}
 }
 
 func TestGitLabWebhookDeletesEnvironment(t *testing.T) {

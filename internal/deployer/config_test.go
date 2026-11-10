@@ -169,3 +169,49 @@ spec:
 	assert.Equal(t, "/ws", spc.WebSocket.Path)
 	assert.Equal(t, "3600s", spc.WebSocket.Timeout)
 }
+
+func TestParseDotDivergeConfig_ImageRepository(t *testing.T) {
+	tests := []struct {
+		name    string
+		repo    string
+		wantErr string
+	}{
+		{name: "unset", repo: ""},
+		{name: "registry and path", repo: "registry.example.com/team/payments-api"},
+		{name: "registry with port", repo: "registry.example.com:5000/team/payments-api"},
+		{name: "tag rejected", repo: "registry.example.com/team/payments-api:latest", wantErr: "must not contain a tag"},
+		{name: "digest rejected", repo: "registry.example.com/team/payments-api@sha256:abc", wantErr: "must not contain a digest"},
+		{name: "whitespace rejected", repo: "registry.example.com/team/payments api", wantErr: "must not contain a digest or whitespace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := "spec:\n  serviceName: payments-api\n  image:\n    repository: \"" + tt.repo + "\"\n"
+			cfg, err := ParseDotDivergeConfig([]byte(input))
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.repo, cfg.Spec.Image.Repository)
+		})
+	}
+}
+
+func TestPreviewImage(t *testing.T) {
+	tests := []struct {
+		name string
+		repo string
+		want string
+	}{
+		{name: "falls back to the Git repository path", repo: "", want: "team/payments-api:abc123def456"},
+		{name: "uses the configured repository", repo: "registry.example.com/previews/payments-api", want: "registry.example.com/previews/payments-api:abc123def456"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &DotDivergeConfig{}
+			cfg.Spec.Image.Repository = tt.repo
+			assert.Equal(t, tt.want, cfg.PreviewImage("team/payments-api", "abc123def456"))
+		})
+	}
+}

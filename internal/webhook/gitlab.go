@@ -361,8 +361,7 @@ func (h *GitLabWebhookHandler) reconcileEnvironment(ctx context.Context, payload
 				if parseErr != nil {
 					return parseErr
 				}
-				image := fmt.Sprintf("%s:%s",
-					payload.Project.PathWithNamespace,
+				image := cfg.PreviewImage(payload.Project.PathWithNamespace,
 					safeSHA(payload.ObjectAttributes.LastCommit.ID, 12))
 				env.Spec.ServiceConfig = cfg.ToServicePreviewConfig(image)
 				env.Spec.Deploy.ChangedServices = []string{cfg.Spec.ServiceName}

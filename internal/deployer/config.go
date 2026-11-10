@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/divergedev/diverge/api/v1alpha1"
@@ -37,6 +38,16 @@ type DotDivergeSpec struct {
 	WebSocket *v1alpha1.WebSocketSpec `yaml:"websocket"`
 	// Container configures the container execution environment.
 	Container DotDivergeContainer `yaml:"container"`
+	// Image configures where the preview image is pulled from.
+	Image DotDivergeImage `yaml:"image"`
+}
+
+// DotDivergeImage configures the preview image reference.
+type DotDivergeImage struct {
+	// Repository is the image repository, without a tag or digest
+	// (for example "registry.example.com/team/payments-api"). When empty,
+	// the repository path on the Git provider is used.
+	Repository string `yaml:"repository"`
 }
 
 // DotDivergeRouting configures preview routing.
@@ -87,12 +98,41 @@ func ParseDotDivergeConfig(data []byte) (*DotDivergeConfig, error) {
 	if cfg.Spec.Port < 1 || cfg.Spec.Port > 65535 {
 		return nil, fmt.Errorf("port %d out of valid range 1-65535", cfg.Spec.Port)
 	}
+	if err := validateImageRepository(cfg.Spec.Image.Repository); err != nil {
+		return nil, err
+	}
 	if cfg.Spec.WebSocket != nil && cfg.Spec.WebSocket.Timeout != "" {
 		if _, err := time.ParseDuration(cfg.Spec.WebSocket.Timeout); err != nil {
 			return nil, fmt.Errorf("invalid websocket timeout: %w", err)
 		}
 	}
 	return &cfg, nil
+}
+
+// validateImageRepository rejects a repository that already carries a tag or
+// digest, since the preview tag is always derived from the commit.
+func validateImageRepository(repo string) error {
+	if repo == "" {
+		return nil
+	}
+	if strings.ContainsAny(repo, "@ \t") {
+		return fmt.Errorf(".diverge.yaml: spec.image.repository %q must not contain a digest or whitespace", repo)
+	}
+	lastSegment := repo[strings.LastIndex(repo, "/")+1:]
+	if strings.Contains(lastSegment, ":") {
+		return fmt.Errorf(".diverge.yaml: spec.image.repository %q must not contain a tag", repo)
+	}
+	return nil
+}
+
+// PreviewImage returns the image reference for a preview: spec.image.repository
+// when set, otherwise defaultRepository, tagged with tag.
+func (c *DotDivergeConfig) PreviewImage(defaultRepository, tag string) string {
+	repo := c.Spec.Image.Repository
+	if repo == "" {
+		repo = defaultRepository
+	}
+	return fmt.Sprintf("%s:%s", repo, tag)
 }
 
 // ToServicePreviewConfig converts a parsed .diverge.yaml into the CRD type.

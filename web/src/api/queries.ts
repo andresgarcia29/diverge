@@ -330,6 +330,7 @@ export interface ReplayEntryResult {
   statusMatch: boolean
   contractDiffs?: ReplayContractDiff[]
   breakingDiffCount: number
+  extractedVars?: Record<string, string>
   passed: boolean
   failureReasons?: string[]
 }
@@ -376,6 +377,7 @@ export interface ReplayEnvironmentRequest {
   previewUrl?: string
   traceContent?: string
   traceFormat?: string
+  sequential?: boolean
   compareValues?: boolean
   failOnExtraFields?: boolean
   ignoreFields?: string[]

@@ -134,11 +134,24 @@ function VerifyResultView({
 function renderReplayRowDetails(row: ReplayEntryResult) {
   const diffs = row.contractDiffs ?? []
   const reasons = row.failureReasons ?? []
-  if (diffs.length === 0 && reasons.length === 0) {
+  const extractedEntries = Object.entries(row.extractedVars ?? {})
+  if (diffs.length === 0 && reasons.length === 0 && extractedEntries.length === 0) {
     return <span className="text-xs text-muted-foreground">No contract drift</span>
   }
   return (
     <div className="space-y-1">
+      {extractedEntries.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {extractedEntries.map(([key, val]) => (
+            <span
+              key={`ext-${key}`}
+              className="inline-flex items-center rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary"
+            >
+              {key}={val}
+            </span>
+          ))}
+        </div>
+      )}
       {reasons.map((reason, idx) => (
         <div key={`reason-${idx}`} className="text-xs text-destructive">
           {reason}

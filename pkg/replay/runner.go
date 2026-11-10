@@ -36,6 +36,7 @@ type Config struct {
 	HeaderKey          string
 	HeaderValue        string
 	Concurrency        int
+	Sequential         bool
 	Timeout            time.Duration
 	MaxLatency         time.Duration
 	FailOnStatusDiff   bool
@@ -51,20 +52,21 @@ type Config struct {
 
 // EntryResult records the baseline vs. preview comparison outcome for a single replayed request.
 type EntryResult struct {
-	Index             int            `json:"index"`
-	ID                string         `json:"id,omitempty"`
-	Method            string         `json:"method"`
-	Path              string         `json:"path"`
-	BaselineStatus    int            `json:"baselineStatus"`
-	PreviewStatus     int            `json:"previewStatus"`
-	BaselineLatencyMs int64          `json:"baselineLatencyMs"`
-	PreviewLatencyMs  int64          `json:"previewLatencyMs"`
-	Protocol          string         `json:"protocol"`
-	StatusMatch       bool           `json:"statusMatch"`
-	ContractDiffs     []ContractDiff `json:"contractDiffs,omitempty"`
-	BreakingDiffCount int            `json:"breakingDiffCount"`
-	Passed            bool           `json:"passed"`
-	FailureReasons    []string       `json:"failureReasons,omitempty"`
+	Index             int               `json:"index"`
+	ID                string            `json:"id,omitempty"`
+	Method            string            `json:"method"`
+	Path              string            `json:"path"`
+	BaselineStatus    int               `json:"baselineStatus"`
+	PreviewStatus     int               `json:"previewStatus"`
+	BaselineLatencyMs int64             `json:"baselineLatencyMs"`
+	PreviewLatencyMs  int64             `json:"previewLatencyMs"`
+	Protocol          string            `json:"protocol"`
+	StatusMatch       bool              `json:"statusMatch"`
+	ContractDiffs     []ContractDiff    `json:"contractDiffs,omitempty"`
+	BreakingDiffCount int               `json:"breakingDiffCount"`
+	ExtractedVars     map[string]string `json:"extractedVars,omitempty"`
+	Passed            bool              `json:"passed"`
+	FailureReasons    []string          `json:"failureReasons,omitempty"`
 }
 
 // Report aggregates the results of replaying a trace against baseline and preview endpoints.
@@ -124,9 +126,14 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 
 	results := make([]EntryResult, len(entries))
 	workerCount := r.Config.Concurrency
+	if r.Config.Sequential || HasChaining(entries) {
+		workerCount = 1
+	}
 	if workerCount > len(entries) {
 		workerCount = len(entries)
 	}
+
+	chainStore := newChainingStore()
 
 	jobs := make(chan int, len(entries))
 	for i := range entries {
@@ -151,7 +158,7 @@ func (r *Runner) Run(ctx context.Context, entries []RequestEntry) (*Report, erro
 					}
 					continue
 				}
-				results[idx] = r.replayEntry(ctx, client, idx, entries[idx], r.Config.BaseURL, previewBase)
+				results[idx] = r.replayEntry(ctx, client, idx, entries[idx], r.Config.BaseURL, previewBase, chainStore)
 			}
 		}()
 	}
@@ -341,13 +348,18 @@ func secureHTTPClient(baseClient *http.Client, timeout time.Duration) *http.Clie
 }
 
 // replayEntry executes a single trace entry against baseline and preview endpoints and compares their responses.
-func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int, entry RequestEntry, baseURL, previewBaseURL string) EntryResult {
-	sanitizedEntryPath := SanitizeURLString(entry.Path, r.Config.StripAuth, r.Config.RedactQueryParams)
+func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int, entry RequestEntry, baseURL, previewBaseURL string, chainStore *chainingStore) EntryResult {
+	baseVars, prevVars := chainStore.snapshot()
+	interpBasePath := InterpolateString(entry.Path, baseVars)
+	interpPrevPath := InterpolateString(entry.Path, prevVars)
+	sanitizedBasePath := SanitizeURLString(interpBasePath, r.Config.StripAuth, r.Config.RedactQueryParams)
+	sanitizedPrevPath := SanitizeURLString(interpPrevPath, r.Config.StripAuth, r.Config.RedactQueryParams)
+
 	res := EntryResult{
 		Index:  index,
 		ID:     entry.ID,
 		Method: entry.Method,
-		Path:   sanitizedEntryPath,
+		Path:   sanitizedPrevPath,
 		Passed: true,
 	}
 
@@ -357,27 +369,39 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		res.FailureReasons = append(res.FailureReasons, err.Error())
 		return res
 	}
-	if len(r.Config.RedactBodyFields) > 0 && len(payload) > 0 {
-		if redacted, ok := RedactJSONBodyFields(payload, r.Config.RedactBodyFields); ok {
-			payload = redacted
+	basePayload := InterpolateBytes(payload, baseVars)
+	prevPayload := InterpolateBytes(payload, prevVars)
+	if len(r.Config.RedactBodyFields) > 0 {
+		if len(basePayload) > 0 {
+			if redacted, ok := RedactJSONBodyFields(basePayload, r.Config.RedactBodyFields); ok {
+				basePayload = redacted
+			}
+		}
+		if len(prevPayload) > 0 {
+			if redacted, ok := RedactJSONBodyFields(prevPayload, r.Config.RedactBodyFields); ok {
+				prevPayload = redacted
+			}
 		}
 	}
 
-	resolvedBaseURL, err := ResolveEntryURL(baseURL, sanitizedEntryPath)
+	resolvedBaseURL, err := ResolveEntryURL(baseURL, sanitizedBasePath)
 	if err != nil {
 		res.Passed = false
 		res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("resolve baseline URL: %v", err))
 		return res
 	}
-	resolvedPrevURL, err := ResolveEntryURL(previewBaseURL, sanitizedEntryPath)
+	resolvedPrevURL, err := ResolveEntryURL(previewBaseURL, sanitizedPrevPath)
 	if err != nil {
 		res.Passed = false
 		res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("resolve preview URL: %v", err))
 		return res
 	}
 
+	baseHeaders := InterpolateHeaders(entry.Headers, baseVars)
+	prevHeaders := InterpolateHeaders(entry.Headers, prevVars)
+
 	noFollowRedirect := entry.ExpectStatus >= 300 && entry.ExpectStatus < 400
-	baseStatus, baseCT, baseGRPCStatus, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, entry.Headers, payload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
+	baseStatus, baseCT, baseGRPCStatus, baseRespHeaders, baseBody, baseDur, baseErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedBaseURL, baseHeaders, basePayload, r.Config.HeaderKey, "", r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
 	res.BaselineLatencyMs = baseDur.Milliseconds()
 	if baseErr != nil {
 		res.Passed = false
@@ -386,7 +410,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 	}
 	res.BaselineStatus = baseStatus
 
-	prevStatus, prevCT, prevGRPCStatus, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, entry.Headers, payload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
+	prevStatus, prevCT, prevGRPCStatus, prevRespHeaders, prevBody, prevDur, prevErr := executeHTTP(ctx, client, r.Config.Timeout, entry.Method, resolvedPrevURL, prevHeaders, prevPayload, r.Config.HeaderKey, r.Config.HeaderValue, r.Config.StripAuth, r.Config.StripHeaders, r.Config.RedactQueryParams, noFollowRedirect, r.Config.FilterHosts)
 	res.PreviewLatencyMs = prevDur.Milliseconds()
 	if prevErr != nil {
 		res.Passed = false
@@ -394,6 +418,23 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		return res
 	}
 	res.PreviewStatus = prevStatus
+
+	if len(entry.Extract) > 0 {
+		extractedBase, baseExtErr := ExtractResponseVars(entry.Extract, baseStatus, baseRespHeaders, baseBody)
+		extractedPrev, prevExtErr := ExtractResponseVars(entry.Extract, prevStatus, prevRespHeaders, prevBody)
+		if baseExtErr != nil {
+			res.Passed = false
+			res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("baseline variable extraction failed: %v", baseExtErr))
+		}
+		if prevExtErr != nil {
+			res.Passed = false
+			res.FailureReasons = append(res.FailureReasons, fmt.Sprintf("preview variable extraction failed: %v", prevExtErr))
+		}
+		if baseExtErr == nil && prevExtErr == nil {
+			chainStore.merge(extractedBase, extractedPrev)
+			res.ExtractedVars = maskExtractedVars(entry.Extract, extractedPrev)
+		}
+	}
 
 	res.StatusMatch = baseStatus == prevStatus
 	if !res.StatusMatch && r.Config.FailOnStatusDiff {
@@ -622,7 +663,7 @@ func sanitizeRequestHeaders(req *http.Request, routingKey, routingVal string, st
 }
 
 // executeHTTP performs a single HTTP request, enforcing per-request timeout, routing headers, body size bounds, and gRPC trailer extraction.
-func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string, redactQueryParams []string, noFollowRedirect bool, allowedRedirectHosts []string) (int, string, string, []byte, time.Duration, error) {
+func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration, method, targetURL string, headers map[string]string, body []byte, routingKey, routingVal string, stripAuth bool, stripHeaders []string, redactQueryParams []string, noFollowRedirect bool, allowedRedirectHosts []string) (int, string, string, http.Header, []byte, time.Duration, error) {
 	policy := requestSanitizePolicy{
 		routingKey:           routingKey,
 		routingVal:           routingVal,
@@ -646,7 +687,7 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 
 	req, err := http.NewRequestWithContext(reqCtx, method, targetURL, bodyReader)
 	if err != nil {
-		return 0, "", "", nil, 0, err
+		return 0, "", "", nil, nil, 0, err
 	}
 
 	for k, v := range headers {
@@ -659,17 +700,17 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, "", "", nil, time.Since(start), err
+		return 0, "", "", nil, nil, time.Since(start), err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	dur := time.Since(start)
 	if err != nil {
-		return resp.StatusCode, resp.Header.Get("Content-Type"), "", nil, dur, fmt.Errorf("read response body: %w", err)
+		return resp.StatusCode, resp.Header.Get("Content-Type"), "", resp.Header, nil, dur, fmt.Errorf("read response body: %w", err)
 	}
 	if len(respBody) > maxResponseBytes {
-		return resp.StatusCode, resp.Header.Get("Content-Type"), "", nil, dur, fmt.Errorf("response body exceeds maximum comparison size of %d bytes", maxResponseBytes)
+		return resp.StatusCode, resp.Header.Get("Content-Type"), "", resp.Header, nil, dur, fmt.Errorf("response body exceeds maximum comparison size of %d bytes", maxResponseBytes)
 	}
 
 	grpcStatus := strings.TrimSpace(resp.Header.Get("Grpc-Status"))
@@ -677,7 +718,7 @@ func executeHTTP(ctx context.Context, client *http.Client, timeout time.Duration
 		grpcStatus = strings.TrimSpace(resp.Trailer.Get("Grpc-Status"))
 	}
 
-	return resp.StatusCode, resp.Header.Get("Content-Type"), grpcStatus, respBody, dur, nil
+	return resp.StatusCode, resp.Header.Get("Content-Type"), grpcStatus, resp.Header, respBody, dur, nil
 }
 
 // stripDivergeBaggage removes any diverge.env=<value> entries from the W3C baggage header.
@@ -758,6 +799,39 @@ func FormatJSON(w io.Writer, report *Report) error {
 	return enc.Encode(report)
 }
 
+// maskExtractedVars hides values captured from response headers, which commonly carry credentials.
+func maskExtractedVars(rules, vars map[string]string) map[string]string {
+	if len(vars) == 0 {
+		return vars
+	}
+	out := make(map[string]string, len(vars))
+	for k, v := range vars {
+		if _, isHeader := parseHeaderSelector(strings.TrimSpace(rules[k])); isHeader {
+			out[k] = RedactedPlaceholder
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// formatExtractedVars formats extracted variable key-value pairs in deterministic sorted order.
+func formatExtractedVars(vars map[string]string) string {
+	if len(vars) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, vars[k]))
+	}
+	return "extracted: " + strings.Join(parts, ", ")
+}
+
 // FormatTable renders a human-readable tabular summary of the replay report.
 func FormatTable(w io.Writer, report *Report) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -778,6 +852,9 @@ func FormatTable(w io.Writer, report *Report) {
 			details = strings.Join(r.FailureReasons, "; ")
 		} else if len(r.ContractDiffs) > 0 {
 			details = fmt.Sprintf("%d non-breaking diff(s)", len(r.ContractDiffs))
+		}
+		if extSummary := formatExtractedVars(r.ExtractedVars); extSummary != "" {
+			details = fmt.Sprintf("%s (%s)", details, extSummary)
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.ID, r.Method, r.Path, protoStr, statusStr, latStr, result, details)
@@ -835,6 +912,9 @@ func FormatMarkdown(w io.Writer, report *Report) error {
 			details = strings.Join(r.FailureReasons, "; ")
 		} else if len(r.ContractDiffs) > 0 {
 			details = fmt.Sprintf("%d non-breaking diff(s)", len(r.ContractDiffs))
+		}
+		if extSummary := formatExtractedVars(r.ExtractedVars); extSummary != "" {
+			details = fmt.Sprintf("%s (%s)", details, extSummary)
 		}
 		details = strings.ReplaceAll(details, "|", "\\|")
 		pathEsc := strings.ReplaceAll(r.Path, "|", "\\|")

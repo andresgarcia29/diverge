@@ -73,6 +73,7 @@ type ReplayEnvironmentRequest struct {
 	TraceContent      string                `json:"traceContent,omitempty"`
 	TraceFormat       string                `json:"traceFormat,omitempty"`
 	Requests          []replay.RequestEntry `json:"requests,omitempty"`
+	Sequential        bool                  `json:"sequential,omitempty"`
 	CompareValues     bool                  `json:"compareValues,omitempty"`
 	FailOnExtraFields bool                  `json:"failOnExtraFields,omitempty"`
 	IgnoreFields      []string              `json:"ignoreFields,omitempty"`
@@ -479,6 +480,7 @@ func (h *VerifyReplayHandler) HandleReplay(w http.ResponseWriter, r *http.Reques
 		PreviewBaseURL:     previewURL,
 		HeaderKey:          headerKey,
 		HeaderValue:        headerValue,
+		Sequential:         req.Sequential,
 		MaxLatency:         maxLatency,
 		FailOnStatusDiff:   true,
 		FailOnContractDiff: true,

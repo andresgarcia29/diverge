@@ -127,7 +127,14 @@ func SanitizeURLString(rawURL string, stripAuth bool, extraQueryParams []string)
 		return sanitizeFallbackURLString(trimmed, stripAuth, extraQueryParams)
 	}
 	sanitizeURLObject(parsed, stripAuth, extraQueryParams)
-	return parsed.String()
+	out := parsed.String()
+	if strings.Contains(trimmed, "{{") {
+		out = strings.ReplaceAll(out, "%7B%7B", "{{")
+		out = strings.ReplaceAll(out, "%7b%7b", "{{")
+		out = strings.ReplaceAll(out, "%7D%7D", "}}")
+		out = strings.ReplaceAll(out, "%7d%7d", "}}")
+	}
+	return out
 }
 
 // sanitizeFallbackURLString strips userinfo and redacts sensitive query segments when url.Parse fails on malformed input.
@@ -158,7 +165,7 @@ func sanitizeFallbackURLString(trimmed string, stripAuth bool, extraQueryParams 
 	if len(redactSet) == 0 {
 		return beforeQuery + "?" + rawQuery
 	}
-	redactedQuery, _ := redactRawQuerySegments(rawQuery, redactSet, stripAuth)
+	redactedQuery, _ := redactRawQuerySegments(rawQuery, redactSet)
 	return beforeQuery + "?" + redactedQuery
 }
 
@@ -177,13 +184,13 @@ func sanitizeURLObject(parsed *url.URL, stripAuth bool, extraQueryParams []strin
 	if len(redactSet) == 0 {
 		return
 	}
-	if redacted, modified := redactRawQuerySegments(parsed.RawQuery, redactSet, stripAuth); modified {
+	if redacted, modified := redactRawQuerySegments(parsed.RawQuery, redactSet); modified {
 		parsed.RawQuery = redacted
 	}
 }
 
 // redactRawQuerySegments scans a raw query string split on '&' or ';' without failing open on malformed escapes.
-func redactRawQuerySegments(rawQuery string, redactSet map[string]struct{}, failClosedOnMalformedKey bool) (string, bool) {
+func redactRawQuerySegments(rawQuery string, redactSet map[string]struct{}) (string, bool) {
 	if rawQuery == "" || len(redactSet) == 0 {
 		return rawQuery, false
 	}
@@ -206,7 +213,7 @@ func redactRawQuerySegments(rawQuery string, redactSet map[string]struct{}, fail
 			}
 			lowerKey := strings.ToLower(strings.TrimSpace(unescapedKey))
 			_, match := redactSet[lowerKey]
-			if match || (failClosedOnMalformedKey && unescapeErr != nil) {
+			if match || unescapeErr != nil {
 				safeKey := url.QueryEscape(strings.TrimSpace(unescapedKey))
 				if unescapeErr != nil {
 					safeKey = "redacted_param"
@@ -360,14 +367,29 @@ type RecorderProxy struct {
 	HeaderKey   string
 	HeaderValue string
 	Sanitize    SanitizeOptions
+	AutoChain   bool
 	MaxRequests int
 	HTTPClient  *http.Client
 	OnRecorded  func(RequestEntry)
 
-	mu      sync.Mutex
-	out     io.Writer
-	entries []RequestEntry
-	counter int
+	mu           sync.Mutex
+	out          io.Writer
+	entries      []RequestEntry
+	counter      int
+	autoChainMap map[string]string
+}
+
+// NewRecorderServer constructs an http.Server configured for both HTTP/1.1 and unencrypted HTTP/2 (h2c)
+// so native gRPC, gRPC-Web, ConnectRPC, and REST clients can record through the reverse proxy.
+func NewRecorderServer(handler http.Handler) *http.Server {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Server{
+		Handler:           handler,
+		Protocols:         &protocols,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 }
 
 // NewRecorderProxy constructs a new RecorderProxy forwarding requests to targetURL and writing sanitized JSONL entries to out.
@@ -435,7 +457,7 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	for k, vals := range r.Header {
 		lower := strings.ToLower(k)
-		if lower == "host" || lower == "connection" || lower == "content-length" {
+		if lower == "host" || lower == "connection" || lower == "content-length" || (p.AutoChain && lower == "accept-encoding") {
 			continue
 		}
 		for _, v := range vals {
@@ -461,13 +483,22 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	for k, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
 	}
+	for k := range resp.Trailer {
+		w.Header().Add("Trailer", k)
+	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, maxResponseBytes))
+	_, _ = w.Write(respBody)
+	for k, vals := range resp.Trailer {
+		for _, v := range vals {
+			w.Header().Add(http.TrailerPrefix+k, v)
+		}
+	}
 
 	recordedPath := reqPath
 	if r.URL.RawQuery != "" {
@@ -494,6 +525,9 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.counter++
+	if p.AutoChain && len(p.autoChainMap) > 0 {
+		recordedPath = rewriteAutoChainedPath(recordedPath, p.autoChainMap)
+	}
 	entry := RequestEntry{
 		ID:           fmt.Sprintf("rec-%d", p.counter),
 		Method:       r.Method,
@@ -507,6 +541,15 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			entry.BodyBase64 = encodeBase64(reqBody)
 		} else {
 			entry.Body = string(reqBody)
+		}
+	}
+	if p.AutoChain && (r.Method == http.MethodPost || r.Method == http.MethodPut) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if varName, selector, rawVal, ok := detectAutoChainID(p.counter, respBody); ok {
+			if p.autoChainMap == nil {
+				p.autoChainMap = make(map[string]string)
+			}
+			p.autoChainMap[rawVal] = "{{" + varName + "}}"
+			entry.Extract = map[string]string{varName: selector}
 		}
 	}
 	sanOpts := p.Sanitize
@@ -536,4 +579,60 @@ func isBinaryContentType(contentType string) bool {
 // encodeBase64 encodes raw bytes as standard base64.
 func encodeBase64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// detectAutoChainID inspects a 2xx JSON response body for a top-level "id" or "uuid" field and returns (varName, selector, rawValue, true).
+func detectAutoChainID(stepNum int, respBody []byte) (string, string, string, bool) {
+	trimmed := bytes.TrimSpace(respBody)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return "", "", "", false
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return "", "", "", false
+	}
+	for _, key := range []string{"id", "uuid"} {
+		val, exists := obj[key]
+		if !exists || val == nil {
+			continue
+		}
+		var strVal string
+		switch v := val.(type) {
+		case string:
+			strVal = strings.TrimSpace(v)
+		case json.Number:
+			strVal = v.String()
+		}
+		if strVal != "" {
+			varName := fmt.Sprintf("step%d_%s", stepNum, key)
+			return varName, "$." + key, strVal, true
+		}
+	}
+	return "", "", "", false
+}
+
+// rewriteAutoChainedPath replaces path segments matching previously captured resource IDs with {{varName}} placeholders.
+func rewriteAutoChainedPath(rawPath string, chainMap map[string]string) string {
+	if len(chainMap) == 0 || rawPath == "" {
+		return rawPath
+	}
+	pathPart, queryPart, hasQuery := strings.Cut(rawPath, "?")
+	segs := strings.Split(pathPart, "/")
+	changed := false
+	for i, seg := range segs {
+		if placeholder, ok := chainMap[seg]; ok && seg != "" {
+			segs[i] = placeholder
+			changed = true
+		}
+	}
+	if !changed {
+		return rawPath
+	}
+	rebuilt := strings.Join(segs, "/")
+	if hasQuery {
+		return rebuilt + "?" + queryPart
+	}
+	return rebuilt
 }

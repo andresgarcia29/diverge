@@ -24,6 +24,7 @@ type recordOptions struct {
 	stripHeaders      []string
 	redactQueryParams []string
 	redactBodyFields  []string
+	autoChain         bool
 	maxRequests       int
 	duration          time.Duration
 }
@@ -94,6 +95,7 @@ for 'diverge replay'.`,
 			}
 			proxy.HeaderKey = headerKey
 			proxy.HeaderValue = headerVal
+			proxy.AutoChain = opts.autoChain
 			proxy.MaxRequests = opts.maxRequests
 
 			runCtx := cmd.Context()
@@ -123,10 +125,7 @@ for 'diverge replay'.`,
 				return fmt.Errorf("listen on %s: %w", listenAddr, err)
 			}
 
-			srv := &http.Server{
-				Handler:           proxy,
-				ReadHeaderTimeout: 10 * time.Second,
-			}
+			srv := replay.NewRecorderServer(proxy)
 
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Recording proxy listening on http://%s -> %s (output: %s)\n", ln.Addr().String(), target, outPath)
 
@@ -164,6 +163,7 @@ for 'diverge replay'.`,
 	cmd.Flags().StringSliceVar(&opts.stripHeaders, "strip-header", nil, "Additional request header name to strip before recording (repeatable)")
 	cmd.Flags().StringSliceVar(&opts.redactQueryParams, "redact-query", nil, "Additional query parameter name to redact with [REDACTED] (repeatable)")
 	cmd.Flags().StringSliceVar(&opts.redactBodyFields, "redact-body-field", nil, "JSON request body field name or dot-path to redact with [REDACTED] (repeatable)")
+	cmd.Flags().BoolVar(&opts.autoChain, "auto-chain", false, "Automatically extract created resource IDs from POST/PUT responses and parameterize subsequent request paths")
 	cmd.Flags().IntVar(&opts.maxRequests, "max-requests", 0, "Stop recording automatically after capturing N requests (0 = unlimited)")
 	cmd.Flags().DurationVarP(&opts.duration, "duration", "d", 0, "Stop recording automatically after this duration (e.g. 30s)")
 

@@ -34,7 +34,7 @@ services:
 
 ### Turnkey Composite Action (Recommended)
 
-Use the official `divergedev/diverge@v0.22.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), replay recorded traffic traces (`replay: "true"` with `replay-from` set to a `.jsonl` or `.har` trace file), optionally trigger self-healing `AgentTask` runs on failure (`auto-fix: "true"`), and expose routing headers to Playwright or Cypress:
+Use the official `divergedev/diverge@v0.23.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), replay recorded traffic traces (`replay: "true"` with `replay-from` set to a `.jsonl` or `.har` trace file), optionally trigger self-healing `AgentTask` runs on failure (`auto-fix: "true"`), and expose routing headers to Playwright or Cypress:
 
 > [!WARNING]
 > **Sanitize replay traces before replaying in PR workflows**: Always scrub live credentials, PII, and sensitive request or response bodies from `.jsonl` / `.har` trace files using `diverge record` (with `--redact-body-field`) or `diverge replay sanitize` **before committing them to your repository**. Enabling `replay-strip-auth: "true"`, `replay-redact-query`, and `replay-redact-body-fields` in CI provides an additional in-flight safeguard during replay, not an alternative to pre-commit trace sanitization.
@@ -57,7 +57,7 @@ jobs:
 
       - name: Deploy Diverge Delta Preview
         id: diverge
-        uses: divergedev/diverge@v0.22.0
+        uses: divergedev/diverge@v0.23.0
         with:
           action: deploy
           kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: divergedev/diverge@v0.22.0
+      - uses: divergedev/diverge@v0.23.0
         with:
           action: teardown
           kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
@@ -163,7 +163,7 @@ Include the official component (`templates/preview/template.yml`). It automatica
 
 ```yaml
 include:
-  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.22.0
+  - component: $CI_SERVER_FQDN/divergedev/diverge/preview@v0.23.0
     inputs:
       diverge_registry: "$CI_REGISTRY_IMAGE"
       diverge_base_url: "https://staging.example.com"

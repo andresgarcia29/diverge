@@ -333,7 +333,7 @@ diverge verify pr-42 --path /healthz --compare-baseline --github-summary
 
 ### `diverge record`
 
-Start a local HTTP reverse-proxy recorder that forwards incoming HTTP/1.1, ConnectRPC, gRPC-Web, and binary Protobuf-over-HTTP requests to an upstream target URL (or a Diverge preview environment's gateway URL with automatic routing header injection) and writes a deterministic `.jsonl` trace for `diverge replay`.
+Start a local HTTP/1.1 + HTTP/2 cleartext (`h2c`) reverse-proxy recorder that forwards incoming HTTP, ConnectRPC, gRPC, gRPC-Web, and binary Protobuf-over-HTTP requests (including upstream HTTP/2 trailers) to an upstream target URL (or a Diverge preview environment's gateway URL with automatic routing header injection) and writes a deterministic `.jsonl` trace for `diverge replay`.
 
 > [!WARNING]
 > **Redaction limits before saving or committing traces**: By default (`--strip-auth=true`), `diverge record` strips `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers, URL userinfo, and default auth query tokens. **JSON request body fields are not redacted by default** — you must explicitly pass `--redact-body-field <field>` (e.g., `--redact-body-field password,cvv`) to scrub sensitive JSON fields, and binary request bodies (`application/proto`, `application/octet-stream`) are captured as base64 and cannot be field-redacted. Verify these limits before saving or committing recorded traces.
@@ -348,6 +348,7 @@ Start a local HTTP reverse-proxy recorder that forwards incoming HTTP/1.1, Conne
 - `--strip-header` — Additional request header name to strip before recording (repeatable)
 - `--redact-query` — Additional query parameter name to redact with `[REDACTED]` (repeatable)
 - `--redact-body-field` — JSON request body field name or dot-path to redact with `[REDACTED]` (repeatable, e.g., `password,$.user.ssn`)
+- `--auto-chain` — Automatically extract `id`/`uuid` fields from `2xx` `POST`/`PUT` JSON responses and parameterize subsequent request paths with `{{stepN_id}}`
 - `--max-requests` — Stop recording automatically after capturing `N` requests (`0` = unlimited)
 - `-d, --duration` — Stop recording automatically after this duration (e.g., `30s`)
 
@@ -376,6 +377,7 @@ Replay a deterministic request trace (`.jsonl`, `.har`, or `.json`) against both
 - `--header-key` — Override routing header key (default: `x-diverge-env`)
 - `--header-value` — Override routing header value (default: environment name)
 - `-c, --concurrency` — Number of concurrent replay workers (default: `4`)
+- `--sequential` — Execute trace entries strictly sequentially in trace order (auto-enabled when entries use `extract` or `{{var}}` chaining)
 - `--timeout` — Per-request HTTP timeout (default: `30s`)
 - `--max-latency` — Maximum acceptable preview response latency per request (e.g., `500ms`)
 - `--compare-values` — Compare exact scalar values in addition to JSON/Protobuf field types and wire schema

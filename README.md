@@ -67,14 +67,14 @@ diverge top --once
   <img src="docs/assets/delta-vs-duplicated.svg" alt="Delta Preview vs Traditional Full-Stack Duplication" width="100%">
 </p>
 
-### Turnkey CI/CD (`divergedev/diverge@v0.22.0`)
+### Turnkey CI/CD (`divergedev/diverge@v0.23.0`)
 
 Deploy a delta `PreviewGroup` for only the services modified in a Pull Request, run `diverge verify` health & latency SLO checks (or `diverge replay` contract diffing with `--auto-fix` self-healing), and pass `routing-header-json` directly into Playwright E2E tests:
 
 ```yaml
 - name: Deploy Diverge Delta Preview
   id: diverge
-  uses: divergedev/diverge@v0.22.0
+  uses: divergedev/diverge@v0.23.0
   with:
     kubeconfig: ${{ secrets.PREVIEW_KUBECONFIG }}
     image-registry: ghcr.io/acme

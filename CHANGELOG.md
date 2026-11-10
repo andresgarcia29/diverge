@@ -1,5 +1,21 @@
 # Changelog
 
+## [v0.23.0] - 2026-11-09
+
+### 🚀 Highlights & New Features
+
+#### 🔗 Stateful Multi-Step Trace Chaining (`extract` & `{{var}}`) & Sequential Replay
+- **Per-Environment Variable Extraction & Interpolation (`pkg/replay/chaining.go`, `pkg/replay/runner.go`, `pkg/replay/trace.go`) (#333)**: Trace entries now support `extract` rules (`$.nested.items[0].id`, `$header.<Name>` / `header:<Name>`, `$status`) and `{{var}}` template interpolation across subsequent request paths, headers, and bodies. `Runner.Run` maintains isolated `baseVars` and `prevVars` stores per environment so multi-step CRUD workflows (`POST /orders` → `GET /orders/{{order_id}}`) replay deterministically even when baseline and preview generate divergent dynamic IDs or tokens, while automatically switching to sequential execution whenever chaining is detected or `--sequential` is enabled.
+- **Header-Extracted Credential Masking in Reports (`pkg/replay/runner.go`) (#333)**: Values extracted via response header selectors (`$header.<Name>` / `header:<Name>`) are automatically masked with `[REDACTED]` in `EntryResult.ExtractedVars` before rendering CLI tables, Markdown summaries, JSON outputs, Web Dashboard badges, or self-healing `AgentTask` objectives, while preserving the real unmasked values inside `chainStore` for subsequent chained requests.
+- **CLI, MCP, Server & Web Dashboard Integration (`internal/cli/replay.go`, `internal/cli/mcp_replay.go`, `internal/server/verify_replay.go`, `web/src/components/VerifyReplayTab.tsx`) (#333)**: Added `--sequential` to `diverge replay`, `sequential` and `extract` schema fields to the `diverge_replay` MCP tool, `sequential` to `POST /api/v1/environments/replay`, and extracted variable badges to CLI/Markdown reports and the Web Dashboard.
+
+#### 🎙️ Auto-Chain Traffic Recording (`diverge record --auto-chain`) & Native `h2c` / gRPC Trailer Forwarding
+- **Automatic CRUD ID Chaining (`pkg/replay/sanitize.go`, `internal/cli/record.go`) (#333)**: Added `--auto-chain` to `diverge record` (`RecorderProxy.AutoChain`) to inspect `2xx` `POST`/`PUT` JSON responses for top-level `id` or `uuid` fields (omitting `Accept-Encoding` on upstream requests so Go's `http.Transport` transparently decompresses gzipped responses), attach `extract` rules (`step1_id: $.id`), and rewrite matching path segments in subsequent recorded requests (`/api/v1/carts/cart-123` → `/api/v1/carts/{{step1_id}}`).
+- **Native HTTP/2 Cleartext (`h2c`) & gRPC Trailer Forwarding (`pkg/replay/sanitize.go`, `internal/cli/record.go`) (#333)**: Added `NewRecorderServer` with `HTTP1` + `UnencryptedHTTP2` (`h2c`) protocol support and upstream HTTP/2 trailer forwarding (`http.TrailerPrefix`) so native gRPC, gRPC-Web, ConnectRPC, and REST traffic can be recorded through `diverge record`.
+- **Fail-Closed Query Redaction & Template Preservation (`pkg/replay/sanitize.go`, `pkg/replay/property_test.go`) (#333)**: Hardened `redactRawQuerySegments` to fail closed on malformed `%`-escaped query keys whenever any query redaction rules are active (even when `--strip-auth=false`), preserved `{{var}}` placeholders in `SanitizeURLString`, and added `pgregory.net/rapid` property tests (`TestProperty_InterpolateAndExtractRoundTrip`).
+
+---
+
 ## [v0.22.0] - 2026-11-09
 
 ### 🚀 Highlights & New Features

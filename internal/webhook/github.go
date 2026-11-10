@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/divergedev/diverge/api/v1alpha1"
+	"github.com/divergedev/diverge/internal/config"
 	"github.com/divergedev/diverge/internal/deployer"
 	"github.com/divergedev/diverge/internal/metrics"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +33,10 @@ type GitHubWebhookHandler struct {
 	Commenter     CommentPoster
 	HTTPClient    *http.Client
 	DefaultNS     string
-	Dedup         *DeliveryDedup
+	// SkipWithoutConfig ignores events from projects with no .diverge.yaml on
+	// the source branch, for deployers that cannot run without one.
+	SkipWithoutConfig bool
+	Dedup             *DeliveryDedup
 }
 
 type GitHubPRPayload struct {
@@ -398,7 +403,10 @@ func (h *GitHubWebhookHandler) reconcileEnvironment(ctx context.Context, payload
 				payload.Repository.FullName,
 				payload.PullRequest.Head.Ref)
 			if err != nil {
-				if strings.Contains(err.Error(), "not found") {
+				if errors.Is(err, config.ErrConfigNotFound) {
+					if h.SkipWithoutConfig {
+						return errNoDotDiverge
+					}
 					env.Spec.ServiceConfig = nil
 					env.Spec.Deploy.ChangedServices = nil
 					env.Spec.Routing.HeaderKey = ""
@@ -426,6 +434,10 @@ func (h *GitHubWebhookHandler) reconcileEnvironment(ctx context.Context, payload
 
 		return nil
 	})
+	if errors.Is(err, errNoDotDiverge) {
+		log.FromContext(ctx).WithName("github-webhook").Info("Skipping project without .diverge.yaml", "project", env.Spec.Source.Project, "ref", env.Spec.Source.Branch)
+		return client.IgnoreNotFound(h.Client.Delete(ctx, env))
+	}
 	return err
 }
 

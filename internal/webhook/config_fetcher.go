@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 )
 
@@ -10,6 +11,10 @@ import (
 type ConfigFetcher interface {
 	FetchConfig(ctx context.Context, provider, project, ref string) ([]byte, error)
 }
+
+// errNoDotDiverge aborts an Environment reconcile for a project that has no
+// .diverge.yaml when the handler is set to skip such projects.
+var errNoDotDiverge = errors.New("project has no .diverge.yaml")
 
 // previewEnvName generates a Kubernetes-safe, project-scoped Environment name.
 // Uses a hash of the project path to prevent collisions across projects

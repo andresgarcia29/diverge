@@ -375,6 +375,7 @@ func main() {
 
 	// Setup webhook server for GitLab events
 	webhookConfig := webhook.WebhookConfig{SecretToken: webhookSecretToken}
+	skipWithoutConfig := deployer.RequiresServiceConfig(deployProvider)
 
 	var glConfigFetcher webhook.ConfigFetcher
 	var glCommenter webhook.CommentPoster
@@ -389,12 +390,13 @@ func main() {
 		setupLog.Info("WARNING: GitLab MR slash commands are disabled because no allowed user IDs are configured; set --gitlab-allowed-users or DIVERGE_GITLAB_ALLOWED_USERS")
 	}
 	mgr.GetWebhookServer().Register("/gitlab-webhook", &webhook.GitLabWebhookHandler{
-		Client:        mgr.GetClient(),
-		Config:        webhookConfig,
-		ConfigFetcher: glConfigFetcher,
-		Commenter:     glCommenter,
-		AllowedUsers:  gitlabAllowedUsers,
-		DefaultNS:     defaultNamespace,
+		Client:            mgr.GetClient(),
+		Config:            webhookConfig,
+		ConfigFetcher:     glConfigFetcher,
+		Commenter:         glCommenter,
+		AllowedUsers:      gitlabAllowedUsers,
+		DefaultNS:         defaultNamespace,
+		SkipWithoutConfig: skipWithoutConfig,
 	})
 
 	if notifierProvider == "gitlab" && notifierToken != "" {
@@ -415,11 +417,12 @@ func main() {
 		ghCommenter = notifier.NewGitHubNotifier(firstNonEmpty(os.Getenv("DIVERGE_BASE_URL"), os.Getenv("GITHUB_API_URL")), notifierToken)
 	}
 	mgr.GetWebhookServer().Register("/github-webhook", &webhook.GitHubWebhookHandler{
-		Client:        mgr.GetClient(),
-		Config:        webhookConfig,
-		ConfigFetcher: ghConfigFetcher,
-		Commenter:     ghCommenter,
-		DefaultNS:     defaultNamespace,
+		Client:            mgr.GetClient(),
+		Config:            webhookConfig,
+		ConfigFetcher:     ghConfigFetcher,
+		Commenter:         ghCommenter,
+		DefaultNS:         defaultNamespace,
+		SkipWithoutConfig: skipWithoutConfig,
 	})
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

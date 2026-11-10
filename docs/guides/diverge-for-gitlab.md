@@ -30,6 +30,8 @@ For **PreviewGroups** support (multi-service environments), add a second webhook
 
 *Note: The webhook endpoint must be accessible from your GitLab instance.*
 
+With `deploy.provider: direct` and `deploy.manifestSourceType: serviceconfig`, Diverge ignores Merge Request events from projects that have no `.diverge.yaml` on the source branch, and removes the preview if a later commit deletes the file. The webhook can then be added once on a GitLab group, and each project opts in by committing a `.diverge.yaml`. Errors other than a missing file (for example an expired token) still fail the webhook delivery.
+
 ## 3. Configure Diverge Environment Variables
 The Diverge controller requires access to GitLab to post comments and validate webhooks. Ensure the following environment variables are set on the Diverge controller manager container:
 - `DIVERGE_NOTIFIER_TOKEN`: GitLab personal access token or project access token (requires `api` scope).

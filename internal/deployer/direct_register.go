@@ -12,6 +12,12 @@ var (
 	manifestSourceType = flag.String("manifest-source-type", "configmap", "Manifest source type for direct deployer (configmap|url|serviceconfig)")
 )
 
+// RequiresServiceConfig reports whether the given deploy provider fails on an
+// Environment without a ServiceConfig, so a project needs a .diverge.yaml.
+func RequiresServiceConfig(provider string) bool {
+	return provider == "direct" && *manifestSourceType == "serviceconfig"
+}
+
 func init() {
 	Providers.Register("direct", registry.Provider[Deployer]{
 		Create: func(deps registry.Deps) (Deployer, error) {

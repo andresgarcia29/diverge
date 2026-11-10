@@ -31,7 +31,9 @@ The `diverge` CLI manages your local development environments and interacts with
 | `diverge preview delete <name>` | Delete a preview group |
 | `diverge preview watch <name>` | Watch a preview group until Ready/Failed |
 | `diverge providers list` | List all registered providers |
-| `diverge replay <env> --from <trace>` | Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traces against baseline and preview |
+| `diverge record [env] --target <url>` | Capture and sanitize live HTTP, ConnectRPC, and Protobuf/gRPC traffic into a replayable `.jsonl` trace |
+| `diverge replay <env> --from <trace>` | Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traces against baseline and preview (`--auto-fix` for self-healing) |
+| `diverge replay sanitize --from <trace>` | Sanitize a `.har`, `.json`, or `.jsonl` trace offline by stripping credentials and redacting query/JSON body fields |
 | `diverge route <service>` | Simulate request routing to a service through the topology |
 | `diverge status` | Show active preview environments and groups |
 | `diverge task` | Manage spec-driven autonomous AI developer tasks (`init`, `create`, `status`, `list`, `logs`, `guide`, `pause`, `resume`, `delete`) |
@@ -318,6 +320,7 @@ A positional `path-or-url` replaces all `--path` values. Use either the position
 - `--github-summary` — Write a Markdown verification scorecard table to `$GITHUB_STEP_SUMMARY` and emit `::error::` workflow annotations on failure
 - `--json` — Output machine-readable JSON verification report
 - `--base-url` — Override the base URL for HTTP verification
+- `--auto-fix` — Automatically create or update a self-healing `AgentTask` (`autofix-verify-<env>`) when verification fails
 
 **Examples:**
 ```bash
@@ -328,11 +331,40 @@ diverge verify pr-42 --path /healthz --compare-baseline --max-latency 500ms
 diverge verify pr-42 --path /healthz --compare-baseline --github-summary
 ```
 
+### `diverge record`
+
+Start a local reverse-proxy recorder that forwards incoming HTTP, ConnectRPC, and Protobuf/gRPC requests to an upstream target URL (or a Diverge preview environment's gateway URL with automatic routing header injection), scrubs credentials and sensitive fields in flight, and writes a deterministic `.jsonl` trace ready for `diverge replay`.
+
+**Usage:** `diverge record [env-name] --target <upstream-url> --output <trace.jsonl> [flags]`
+
+**Flags:**
+- `-t, --target` — Upstream HTTP/gRPC target URL to proxy and record (optional when `[env-name]` is provided)
+- `-l, --listen` — Local address for the recording reverse proxy (default: `127.0.0.1:8095`)
+- `-o, --output` — Output JSONL trace file path, or `-` for stdout (default: `trace.jsonl`)
+- `--strip-auth` — Strip `Authorization`, `Cookie`, `X-Api-Key` headers, URL userinfo, and default auth query tokens (default: `true`)
+- `--strip-header` — Additional request header name to strip before recording (repeatable)
+- `--redact-query` — Additional query parameter name to redact with `[REDACTED]` (repeatable)
+- `--redact-body-field` — JSON request body field name or dot-path to redact with `[REDACTED]` (repeatable, e.g., `password,$.user.ssn`)
+- `--max-requests` — Stop recording automatically after capturing `N` requests (`0` = unlimited)
+- `-d, --duration` — Stop recording automatically after this duration (e.g., `30s`)
+
+**Examples:**
+```bash
+# Record 20 requests against staging and scrub auth + sensitive JSON body fields
+diverge record --target https://staging.example.com --output ./traces/checkout.jsonl --max-requests 20 --redact-body-field password,cvv
+
+# Record traffic routed to preview environment pr-42 for 30 seconds
+diverge record pr-42 --output ./traces/pr-42.jsonl --duration 30s
+```
+
 ### `diverge replay`
 
 Replay a deterministic request trace (`.jsonl`, `.har`, or `.json`) against both baseline (unrouted) and a candidate preview `Environment` or `PreviewGroup` (with `x-diverge-env` and W3C `baggage` injected). Compares HTTP status code parity, per-request and p50/p95 latency, JSON structural schemas, and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via `--proto-descriptor`). Automatically strips recorded `diverge_env` sticky-routing cookies from both baseline and preview requests so multi-cookie headers preserve non-routing cookies without contaminating baseline responses.
 
 **Usage:** `diverge replay <env-name> --from <trace.jsonl|trace.har|trace.json> [flags]`
+
+**Subcommands:**
+- `diverge replay sanitize --from <trace.har|trace.jsonl> [--output <clean.jsonl>]` — Convert and scrub a trace file offline (`--strip-auth`, `--strip-header`, `--redact-query`, `--redact-body-field`, `--filter-host`) into sanitized JSONL.
 
 **Flags:**
 - `-f, --from` — Path to request trace file (`.jsonl`, `.har`, `.json`, or `-` for stdin)
@@ -350,9 +382,12 @@ Replay a deterministic request trace (`.jsonl`, `.har`, or `.json`) against both
 - `--ignore-field` — Field name or path to ignore during diffing (repeatable, e.g., `--ignore-field request_id`)
 - `--filter-host` — Retain only trace entries matching the given hostname or wildcard pattern (repeatable, e.g., `--filter-host api.example.com --filter-host '*.example.com'`)
 - `--strip-header` — Request header name to strip before replaying (repeatable, e.g., `--strip-header X-Internal-Token`)
-- `--strip-auth` — Strip `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers before replaying
+- `--strip-auth` — Strip `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers, URL userinfo, and default auth query tokens before replaying
+- `--redact-query` — Additional query parameter name to redact with `[REDACTED]` before replaying (repeatable)
+- `--redact-body-field` — JSON request body field name or dot-path to redact with `[REDACTED]` before replaying (repeatable)
 - `--proto-descriptor` — Optional path to compiled Protobuf `FileDescriptorSet` (`.binpb`) for schema-aware decoding
 - `--proto-message` — Default fully-qualified Protobuf message type for response decoding
+- `--auto-fix` — Automatically create or update a self-healing `AgentTask` (`autofix-replay-<env>`) when replay detects regressions
 - `--json` — Output replay report as JSON
 - `--github-summary` — Write Markdown replay report to `$GITHUB_STEP_SUMMARY` (or stdout, or stderr when `--json` is set)
 

@@ -457,7 +457,7 @@ func (p *RecorderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	for k, vals := range r.Header {
 		lower := strings.ToLower(k)
-		if lower == "host" || lower == "connection" || lower == "content-length" {
+		if lower == "host" || lower == "connection" || lower == "content-length" || (p.AutoChain && lower == "accept-encoding") {
 			continue
 		}
 		for _, v := range vals {

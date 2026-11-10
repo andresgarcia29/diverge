@@ -49,8 +49,7 @@ func TestInterpolateAndExtractResponseVars(t *testing.T) {
 
 func TestRunner_StatefulMultiStepChainingWithDivergentIDs(t *testing.T) {
 	// Baseline generates "ord-base-100" while Preview generates "ord-prev-200".
-	// Step 2 (GET /api/v1/orders/{{order_id}}) and Step 3 (POST /api/v1/orders/{{order_id}}/confirm)
-	// must route each environment's own extracted order_id and session header.
+	// Step 2 (GET /api/v1/orders/{{order_id}}) must route each environment's own extracted order_id and session header.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isPreview := r.Header.Get("x-diverge-env") == "pr-42"
 		w.Header().Set("Content-Type", "application/json")
@@ -111,12 +110,14 @@ func TestRunner_StatefulMultiStepChainingWithDivergentIDs(t *testing.T) {
 	assert.True(t, report.Passed)
 	require.Len(t, report.Results, 2)
 	assert.Equal(t, "ord-prev-200", report.Results[0].ExtractedVars["order_id"])
-	assert.Equal(t, "prev-tok-200", report.Results[0].ExtractedVars["order_tok"])
+	assert.Equal(t, RedactedPlaceholder, report.Results[0].ExtractedVars["order_tok"])
 	assert.Equal(t, "/api/v1/orders/ord-prev-200", report.Results[1].Path)
 }
 
-func TestRecorderProxy_AutoChainAndH2CTrailers(t *testing.T) {
+func TestRecorderProxy_AutoChain(t *testing.T) {
+	var upstreamSawAcceptEncoding string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamSawAcceptEncoding = r.Header.Get("Accept-Encoding")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/carts":
 			w.Header().Set("Content-Type", "application/json")
@@ -141,9 +142,14 @@ func TestRecorderProxy_AutoChainAndH2CTrailers(t *testing.T) {
 	recSrv := httptest.NewServer(proxy)
 	defer recSrv.Close()
 
-	resp1, err := recSrv.Client().Post(recSrv.URL+"/api/v1/carts", "application/json", strings.NewReader(`{}`))
+	req1, err := http.NewRequest(http.MethodPost, recSrv.URL+"/api/v1/carts", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Accept-Encoding", "gzip, br")
+	resp1, err := recSrv.Client().Do(req1)
 	require.NoError(t, err)
 	_ = resp1.Body.Close()
+	assert.NotEqual(t, "gzip, br", upstreamSawAcceptEncoding)
 
 	resp2, err := recSrv.Client().Get(recSrv.URL + "/api/v1/carts/cart-abc-999?view=full")
 	require.NoError(t, err)
@@ -153,4 +159,16 @@ func TestRecorderProxy_AutoChainAndH2CTrailers(t *testing.T) {
 	require.Len(t, entries, 2)
 	assert.Equal(t, map[string]string{"step1_id": "$.id"}, entries[0].Extract)
 	assert.Equal(t, "/api/v1/carts/{{step1_id}}?view=full", entries[1].Path)
+}
+
+func TestRecorderServer_H2CTrailersAndSanitizeEdgeCases(t *testing.T) {
+	srv := NewRecorderServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	require.NotNil(t, srv.Protocols)
+	assert.True(t, srv.Protocols.HTTP1())
+	assert.True(t, srv.Protocols.UnencryptedHTTP2())
+
+	sanitizedPath := SanitizeURLString("/api/v1/orders/{{order_id}}?%ZZbadkey=secret&custom_secret=val&keep=1", false, []string{"custom_secret"})
+	assert.Equal(t, "/api/v1/orders/{{order_id}}?redacted_param=%5BREDACTED%5D&custom_secret=%5BREDACTED%5D&keep=1", sanitizedPath)
 }

@@ -432,7 +432,7 @@ func (r *Runner) replayEntry(ctx context.Context, client *http.Client, index int
 		}
 		if baseExtErr == nil && prevExtErr == nil {
 			chainStore.merge(extractedBase, extractedPrev)
-			res.ExtractedVars = extractedPrev
+			res.ExtractedVars = maskExtractedVars(entry.Extract, extractedPrev)
 		}
 	}
 
@@ -797,6 +797,22 @@ func FormatJSON(w io.Writer, report *Report) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(report)
+}
+
+// maskExtractedVars hides values captured from response headers, which commonly carry credentials.
+func maskExtractedVars(rules, vars map[string]string) map[string]string {
+	if len(vars) == 0 {
+		return vars
+	}
+	out := make(map[string]string, len(vars))
+	for k, v := range vars {
+		if _, isHeader := parseHeaderSelector(strings.TrimSpace(rules[k])); isHeader {
+			out[k] = RedactedPlaceholder
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // formatExtractedVars formats extracted variable key-value pairs in deterministic sorted order.

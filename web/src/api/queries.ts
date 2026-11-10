@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { PartialMessage } from '@bufbuild/protobuf'
 import type { AgentTaskSpec } from '@/api/gen/diverge/v1alpha1/agenttask_pb'
-import { environmentClient, previewGroupClient, clusterClient, authClient, agentTaskClient } from '@/api/client'
+import { environmentClient, previewGroupClient, clusterClient, authClient, agentTaskClient, getToken } from '@/api/client'
 
 export const queryKeys = {
   environments: (ns?: string) => ['environments', ns ?? 'all'] as const,
@@ -285,6 +285,172 @@ export function useGuideAgentTask() {
       agentTaskClient.guideTask(req),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: queryKeys.agentTask(vars.namespace, vars.name) })
+    },
+  })
+}
+
+export interface VerifyCheckItem {
+  name: string
+  passed: boolean
+  status: string
+  durationMs?: number
+  message: string
+}
+
+export interface VerifyEnvironmentRequest {
+  name: string
+  namespace?: string
+  baseUrl?: string
+  previewUrl?: string
+  paths?: string[]
+  maxLatencyMs?: number
+  compareBaseline?: boolean
+  skipDoctor?: boolean
+  autoFix?: boolean
+}
+
+export interface ReplayContractDiff {
+  path: string
+  kind: string
+  baseline?: string
+  preview?: string
+  breaking: boolean
+}
+
+export interface ReplayEntryResult {
+  index: number
+  id?: string
+  method: string
+  path: string
+  baselineStatus: number
+  previewStatus: number
+  baselineLatencyMs: number
+  previewLatencyMs: number
+  protocol: string
+  statusMatch: boolean
+  contractDiffs?: ReplayContractDiff[]
+  breakingDiffCount: number
+  passed: boolean
+  failureReasons?: string[]
+}
+
+export interface ReplayEnvironmentResponse {
+  environment?: string
+  namespace?: string
+  targetUrl?: string
+  previewUrl?: string
+  routingHeader?: string
+  totalRequests: number
+  passedRequests: number
+  failedRequests: number
+  statusMismatches: number
+  breakingDiffs: number
+  baselineP50Ms: number
+  baselineP95Ms: number
+  previewP50Ms: number
+  previewP95Ms: number
+  passed: boolean
+  results: ReplayEntryResult[]
+  markdown?: string
+  autoFixTaskName?: string
+  autoFixError?: string
+}
+
+export interface VerifyEnvironmentResponse {
+  environment: string
+  namespace: string
+  targetUrl?: string
+  previewUrl?: string
+  routingHeader?: string
+  passed: boolean
+  checks: VerifyCheckItem[]
+  replayReport?: ReplayEnvironmentResponse
+  autoFixTaskName?: string
+  autoFixError?: string
+}
+
+export interface ReplayEnvironmentRequest {
+  name: string
+  namespace?: string
+  baseUrl?: string
+  previewUrl?: string
+  traceContent?: string
+  traceFormat?: string
+  compareValues?: boolean
+  failOnExtraFields?: boolean
+  ignoreFields?: string[]
+  filterHosts?: string[]
+  stripAuth?: boolean
+  stripHeaders?: string[]
+  redactQueryParams?: string[]
+  redactBodyFields?: string[]
+  maxLatencyMs?: number
+  autoFix?: boolean
+}
+
+/**
+ * Helper to execute JSON POST requests against diverge-server REST endpoints with Bearer auth.
+ */
+async function postJSONEndpoint<TReq, TRes>(url: string, payload: TReq): Promise<TRes> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  const token = getToken()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  const fullUrl = url.startsWith('http') ? url : `${window.location.origin}${url}`
+  const res = await fetch(fullUrl, {
+    method: 'POST',
+    headers,
+    credentials: 'same-origin',
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const errText = await res.text()
+    try {
+      const parsed = JSON.parse(errText) as { error?: unknown }
+      if (typeof parsed.error === 'string' && parsed.error.trim()) {
+        throw new Error(parsed.error.trim())
+      }
+    } catch (parseErr) {
+      if (parseErr instanceof Error && !(parseErr instanceof SyntaxError)) {
+        throw parseErr
+      }
+    }
+    throw new Error(errText.trim() || `Request failed with status ${res.status}`)
+  }
+  return (await res.json()) as TRes
+}
+
+/**
+ * Mutation hook for running end-to-end health, readiness, and HTTP probe verification on a preview environment.
+ */
+export function useVerifyEnvironment() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (req: VerifyEnvironmentRequest) =>
+      postJSONEndpoint<VerifyEnvironmentRequest, VerifyEnvironmentResponse>('/api/v1/environments/verify', req),
+    onSuccess: (data) => {
+      if (data.autoFixTaskName) {
+        qc.invalidateQueries({ queryKey: ['agentTasks'] })
+      }
+    },
+  })
+}
+
+/**
+ * Mutation hook for running deterministic traffic replay and contract diffing on a preview environment.
+ */
+export function useReplayEnvironment() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (req: ReplayEnvironmentRequest) =>
+      postJSONEndpoint<ReplayEnvironmentRequest, ReplayEnvironmentResponse>('/api/v1/environments/replay', req),
+    onSuccess: (data) => {
+      if (data.autoFixTaskName) {
+        qc.invalidateQueries({ queryKey: ['agentTasks'] })
+      }
     },
   })
 }

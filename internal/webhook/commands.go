@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -39,8 +42,8 @@ Use ` + "`/diverge <command>`" + ` in any PR or MR comment to manage preview env
 | ` + "`/diverge resume [+$amount] [tokens]`" + ` | Resume agent with optional budget bump | ` + "`/diverge resume +$5.00`" + ` |
 | ` + "`/diverge status`" + ` | Report active tasks and preview environments | ` + "`/diverge status`" + ` |
 | ` + "`/diverge preview`" + ` | Deploy preview environment for this branch | ` + "`/diverge preview`" + ` |
-| ` + "`/diverge verify [path]`" + ` | Run health diagnostics & HTTP probe against preview | ` + "`/diverge verify /healthz`" + ` |
-| ` + "`/diverge replay [path ...]`" + ` | Replay baseline vs preview parity checks | ` + "`/diverge replay /api/v1/health /api/v1/status`" + ` |
+| ` + "`/diverge verify [path] [--fix]`" + ` | Run health diagnostics & HTTP probe against preview | ` + "`/diverge verify /healthz --fix`" + ` |
+| ` + "`/diverge replay [path ...] [--fix]`" + ` | Replay baseline vs preview parity checks | ` + "`/diverge replay /api/v1/health /api/v1/status --fix`" + ` |
 | ` + "`/diverge extend-ttl [duration]`" + ` | Extend preview TTL (default 24h) | ` + "`/diverge extend-ttl 48h`" + ` |
 | ` + "`/diverge teardown`" + ` | Tear down preview environment & agent tasks | ` + "`/diverge teardown`" + ` |
 | ` + "`/diverge help`" + ` | Show this command reference | ` + "`/diverge help`" + ` |
@@ -55,6 +58,7 @@ type SlashCommand struct {
 	BudgetUSD string
 	Tokens    int64
 	Paths     []string
+	AutoFix   bool
 }
 
 // ParseSlashCommand parses a PR/MR comment body for a /diverge slash command.
@@ -108,13 +112,24 @@ func ParseSlashCommand(commentBody string) (*SlashCommand, bool) {
 				Action: "preview",
 			}, true
 		case "verify", "replay":
-			paths, ok := parseSafeRelativePaths(fields[1:])
+			autoFix := false
+			pathTokens := make([]string, 0, len(fields[1:]))
+			for _, tok := range fields[1:] {
+				switch strings.ToLower(strings.TrimSpace(tok)) {
+				case "--fix", "--auto-fix":
+					autoFix = true
+				default:
+					pathTokens = append(pathTokens, tok)
+				}
+			}
+			paths, ok := parseSafeRelativePaths(pathTokens)
 			if !ok {
 				return nil, false
 			}
 			return &SlashCommand{
-				Action: subcmd,
-				Paths:  paths,
+				Action:  subcmd,
+				Paths:   paths,
+				AutoFix: autoFix,
 			}, true
 		case "teardown":
 			return &SlashCommand{
@@ -247,9 +262,9 @@ func ExecuteSlashCommandWithFeedback(ctx context.Context, c client.Client, ns st
 	case "preview":
 		return executePreviewCommand(ctx, c, ns, repoURL, branch, prNumber)
 	case "verify":
-		return executeVerifyCommand(ctx, c, ns, cmd.Paths, repoURL, prNumber)
+		return executeVerifyCommand(ctx, c, ns, cmd.Paths, cmd.AutoFix, repoURL, branch, prNumber)
 	case "replay":
-		return executeReplayCommand(ctx, c, ns, cmd.Paths, repoURL, prNumber)
+		return executeReplayCommand(ctx, c, ns, cmd.Paths, cmd.AutoFix, repoURL, branch, prNumber)
 	case "teardown":
 		return executeTeardownCommand(ctx, c, ns, repoURL, prNumber)
 	case "extend-ttl":
@@ -416,11 +431,12 @@ func executePreviewCommand(ctx context.Context, c client.Client, ns, repoURL, br
 	return feedback, nil
 }
 
-// resolvePreviewTarget resolves the preview environment name, base URL, routing mode, and routing header key/value for a PR/MR.
-func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (envName, baseURL, routingMode, headerKey, headerValue string, found bool, err error) {
+// resolvePreviewTarget resolves the preview environment name, base URL, preview URL, routing mode, and routing header key/value for a PR/MR.
+func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL string, prNumber int) (envName, baseURL, previewURL, routingMode, headerKey, headerValue string, found bool, err error) {
+	defaultBaseline := stripPreviewQueryParam(os.Getenv("DIVERGE_BASE_URL"))
 	envs, err := findMatchingEnvironments(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
-		return "", "", "", "", "", false, err
+		return "", "", "", "", "", "", false, err
 	}
 	if len(envs) > 0 {
 		env := envs[0]
@@ -440,23 +456,40 @@ func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL stri
 		if env.Spec.Routing.HeaderValue != "" {
 			headerValue = env.Spec.Routing.HeaderValue
 		}
-		if env.Status.URL != "" {
-			baseURL = stripPreviewQueryParam(env.Status.URL)
-		} else if env.Spec.Routing.ExternalURL != "" {
-			baseURL = stripPreviewQueryParam(env.Spec.Routing.ExternalURL)
+		statusClean := stripPreviewQueryParam(env.Status.URL)
+		extClean := ""
+		if ext := strings.TrimSpace(env.Spec.Routing.ExternalURL); ext != "" && !strings.Contains(ext, "{") {
+			extClean = stripPreviewQueryParam(ext)
 		}
-		return envName, baseURL, routingMode, headerKey, headerValue, true, nil
+		if strings.EqualFold(routingMode, "subdomain") {
+			previewURL = statusClean
+			if extClean != "" && !strings.EqualFold(extClean, previewURL) {
+				baseURL = extClean
+			} else if defaultBaseline != "" {
+				baseURL = defaultBaseline
+			}
+		} else {
+			if statusClean != "" {
+				baseURL = statusClean
+			} else if extClean != "" {
+				baseURL = extClean
+			} else if defaultBaseline != "" {
+				baseURL = defaultBaseline
+			}
+			previewURL = baseURL
+		}
+		return envName, baseURL, previewURL, routingMode, headerKey, headerValue, true, nil
 	}
 
 	pgs, err := findMatchingPreviewGroups(ctx, c, repoURL, prNumber)
 	if err != nil {
-		return "", "", "", "", "", false, err
+		return "", "", "", "", "", "", false, err
 	}
 	if len(pgs) == 0 {
-		return "", "", "", "", "", false, nil
+		return "", "", "", "", "", "", false, nil
 	}
 	if len(pgs) > 1 {
-		return "", "", "", "", "", false, fmt.Errorf("multiple PreviewGroups (%d) matched PR/MR #%d; cannot unambiguously resolve preview target", len(pgs), prNumber)
+		return "", "", "", "", "", "", false, fmt.Errorf("multiple PreviewGroups (%d) matched PR/MR #%d; cannot unambiguously resolve preview target", len(pgs), prNumber)
 	}
 
 	pg := pgs[0]
@@ -470,12 +503,35 @@ func resolvePreviewTarget(ctx context.Context, c client.Client, ns, repoURL stri
 	if pg.Spec.Routing.HeaderValue != "" {
 		headerValue = pg.Spec.Routing.HeaderValue
 	}
+	extClean := ""
 	if ext := strings.TrimSpace(pg.Spec.Routing.ExternalURL); ext != "" && !strings.Contains(ext, "{") {
-		baseURL = stripPreviewQueryParam(ext)
-	} else if len(pg.Status.Services) == 1 && strings.TrimSpace(pg.Status.Services[0].URL) != "" {
-		baseURL = stripPreviewQueryParam(pg.Status.Services[0].URL)
+		extClean = stripPreviewQueryParam(ext)
 	}
-	return envName, baseURL, routingMode, headerKey, headerValue, true, nil
+	svcClean := ""
+	if len(pg.Status.Services) == 1 && strings.TrimSpace(pg.Status.Services[0].URL) != "" {
+		svcClean = stripPreviewQueryParam(pg.Status.Services[0].URL)
+	}
+	if strings.EqualFold(routingMode, "subdomain") {
+		previewURL = svcClean
+		if previewURL == "" {
+			previewURL = extClean
+		}
+		if extClean != "" && !strings.EqualFold(extClean, previewURL) {
+			baseURL = extClean
+		} else if defaultBaseline != "" {
+			baseURL = defaultBaseline
+		}
+	} else {
+		if extClean != "" {
+			baseURL = extClean
+		} else if svcClean != "" {
+			baseURL = svcClean
+		} else if defaultBaseline != "" {
+			baseURL = defaultBaseline
+		}
+		previewURL = baseURL
+	}
+	return envName, baseURL, previewURL, routingMode, headerKey, headerValue, true, nil
 }
 
 // stripPreviewQueryParam removes the _diverge_env sticky-routing query parameter from a preview URL.
@@ -491,8 +547,8 @@ func stripPreviewQueryParam(rawURL string) string {
 }
 
 // executeVerifyCommand runs cluster workload diagnostics and HTTP parity/health probes for a PR/MR preview environment.
-func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
-	envName, baseURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths []string, autoFix bool, repoURL, branch string, prNumber int) (string, error) {
+	envName, baseURL, previewURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
 		return "", err
 	}
@@ -511,7 +567,8 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 	replayPassed := false
 	var repReport *replay.Report
 	subdomainRouted := strings.EqualFold(routingMode, "subdomain")
-	if baseURL != "" && !subdomainRouted {
+	canProbeHTTP := baseURL != "" && (!subdomainRouted || previewURL != "")
+	if canProbeHTTP {
 		entries := make([]replay.RequestEntry, 0, len(paths))
 		for _, p := range paths {
 			entries = append(entries, replay.RequestEntry{
@@ -523,6 +580,7 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 		repReport, err = replay.NewRunner(replay.Config{
 			Environment:      envName,
 			BaseURL:          baseURL,
+			PreviewBaseURL:   previewURL,
 			HeaderKey:        headerKey,
 			HeaderValue:      headerValue,
 			FailOnStatusDiff: true,
@@ -560,17 +618,26 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 		fmt.Fprintf(&b, "- **Workload Diagnostics**: ❌ %d issue(s) detected\n", len(docReport.Issues))
 	}
 
-	if subdomainRouted {
-		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (subdomain-routed environment requires an explicit baseline URL for parity comparison)\n")
+	if subdomainRouted && !canProbeHTTP {
+		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (subdomain-routed environment requires an explicit baseline URL via `spec.routing.externalUrl` or `DIVERGE_BASE_URL`)\n")
+		if !docHealthy && autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 	if baseURL == "" {
 		b.WriteString("- **HTTP Probe**: ⏭️ Skipped (preview URL not yet assigned in `status.url`)\n")
+		if !docHealthy && autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 
 	if err != nil {
 		fmt.Fprintf(&b, "- **HTTP Probe**: ❌ Error (`%v`)\n", err)
+		if autoFix {
+			appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+		}
 		return b.String(), nil
 	}
 
@@ -580,20 +647,25 @@ func executeVerifyCommand(ctx context.Context, c client.Client, ns string, paths
 		_ = replay.FormatMarkdown(&mdBuf, repReport)
 		b.WriteString(mdBuf.String())
 	}
+
+	if !overallPassed && autoFix {
+		appendWebhookAutoFixSection(ctx, c, ns, envName, "verify", b.String(), &b, repoURL, branch, prNumber)
+	}
 	return b.String(), nil
 }
 
 // executeReplayCommand runs deterministic baseline-vs-preview HTTP parity checks across the requested paths for a PR/MR preview environment.
-func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths []string, repoURL string, prNumber int) (string, error) {
-	envName, baseURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
+func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths []string, autoFix bool, repoURL, branch string, prNumber int) (string, error) {
+	envName, baseURL, previewURL, routingMode, headerKey, headerValue, found, err := resolvePreviewTarget(ctx, c, ns, repoURL, prNumber)
 	if err != nil {
 		return "", err
 	}
 	if !found {
 		return "⚠️ No active preview environment found for this PR/MR. Run `/diverge preview` first.", nil
 	}
-	if strings.EqualFold(routingMode, "subdomain") {
-		return fmt.Sprintf("⚠️ Preview environment `%s` uses subdomain routing, which requires an explicit baseline URL (`diverge replay %s --base-url <baseline-url>`).", envName, envName), nil
+	subdomainRouted := strings.EqualFold(routingMode, "subdomain")
+	if subdomainRouted && (baseURL == "" || previewURL == "") {
+		return fmt.Sprintf("⚠️ Preview environment `%s` uses subdomain routing, which requires an explicit baseline URL (`spec.routing.externalUrl`, `DIVERGE_BASE_URL`, or `diverge replay %s --base-url <baseline-url>`).", envName, envName), nil
 	}
 	if baseURL == "" {
 		return fmt.Sprintf("⚠️ Preview environment `%s` does not have an active target URL yet (`status.url` is empty).", envName), nil
@@ -612,12 +684,14 @@ func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths
 	}
 
 	report, err := replay.NewRunner(replay.Config{
-		Environment:      envName,
-		BaseURL:          baseURL,
-		HeaderKey:        headerKey,
-		HeaderValue:      headerValue,
-		FailOnStatusDiff: true,
-		Timeout:          10 * time.Second,
+		Environment:        envName,
+		BaseURL:            baseURL,
+		PreviewBaseURL:     previewURL,
+		HeaderKey:          headerKey,
+		HeaderValue:        headerValue,
+		FailOnStatusDiff:   true,
+		FailOnContractDiff: true,
+		Timeout:            10 * time.Second,
 	}).Run(ctx, entries)
 	if err != nil {
 		return "", err
@@ -627,7 +701,71 @@ func executeReplayCommand(ctx context.Context, c client.Client, ns string, paths
 	if err := replay.FormatMarkdown(&mdBuf, report); err != nil {
 		return "", err
 	}
+	if !report.Passed && autoFix {
+		appendWebhookAutoFixSection(ctx, c, ns, envName, "replay", mdBuf.String(), &mdBuf, repoURL, branch, prNumber)
+	}
 	return mdBuf.String(), nil
+}
+
+// appendWebhookAutoFixSection spawns or updates an autonomous AgentTask and appends the outcome to out.
+func appendWebhookAutoFixSection(ctx context.Context, c client.Client, ns, envName, failureKind, summary string, out io.Writer, repoURL, branch string, prNumber int) {
+	taskName, fixErr := spawnWebhookAutoFixTask(ctx, c, ns, envName, failureKind, summary, repoURL, branch, prNumber)
+	if fixErr != nil {
+		slog.Warn("webhook auto-fix task creation failed", "environment", envName, "namespace", ns, "failureKind", failureKind, "error", fixErr)
+		_, _ = fmt.Fprintf(out, "\n⚠️ **Self-Healing Failed**: Could not create or update the autonomous agent task. Check the Diverge webhook logs.\n")
+		return
+	}
+	if taskName != "" {
+		_, _ = fmt.Fprintf(out, "\n🤖 **Self-Healing Triggered**: Spawned/updated autonomous agent task `%s` to investigate and fix this failure.\n", taskName)
+	}
+}
+
+// spawnWebhookAutoFixTask creates or updates an AgentTask seeded with a verification or replay failure summary.
+func spawnWebhookAutoFixTask(ctx context.Context, c client.Client, ns, envName, failureKind, summary, repoURL, branch string, prNumber int) (string, error) {
+	if repoURL == "" {
+		repoURL = "https://github.com/unknown/repository"
+	}
+	objective := fmt.Sprintf("Fix %s regression on preview environment %s:\n\n%s", failureKind, envName, strings.TrimSpace(summary))
+	taskName := buildCommandTaskName(repoURL, prNumber, "autofix-"+failureKind+"-"+envName)
+	prStr := strconv.Itoa(prNumber)
+	workingBranch := fmt.Sprintf("agent/%s", taskName)
+	if prNumber > 0 {
+		workingBranch = fmt.Sprintf("pr-%d", prNumber)
+	}
+
+	task := &v1alpha1.AgentTask{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: ns,
+		},
+	}
+	_, err := ctrl.CreateOrUpdate(ctx, c, task, func() error {
+		if task.Labels == nil {
+			task.Labels = make(map[string]string)
+		}
+		if task.Annotations == nil {
+			task.Annotations = make(map[string]string)
+		}
+		task.Labels["divergedev.com/managed-by"] = "diverge-webhook"
+		task.Labels["diverge.io/autofix"] = failureKind
+		if prNumber > 0 {
+			task.Labels[prNumberAnnotationKey] = prStr
+			task.Annotations[prNumberAnnotationKey] = prStr
+		}
+		task.Annotations["divergedev.com/guidance"] = objective
+		task.Spec.Objective = objective
+		task.Spec.Suspended = false
+		task.Spec.Repository = v1alpha1.AgentTaskRepository{
+			URL:           repoURL,
+			BaseBranch:    branch,
+			WorkingBranch: workingBranch,
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return taskName, nil
 }
 
 // executeTeardownCommand deletes all matching Environments, PreviewGroups, and AgentTasks for a PR/MR.

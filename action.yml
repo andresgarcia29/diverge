@@ -123,9 +123,17 @@ inputs:
     required: false
     default: ""
   replay-strip-auth:
-    description: "Strip recorded Authorization/X-Api-Key headers from replayed traces (true/false)"
+    description: "Strip recorded Authorization/X-Api-Key headers and auth query tokens from replayed traces (true/false)"
     required: false
     default: "false"
+  replay-redact-query:
+    description: "Comma-separated query parameter names to redact with [REDACTED] before replaying"
+    required: false
+    default: ""
+  replay-redact-body-fields:
+    description: "Comma-separated JSON request body field names or dot-paths to redact before replaying"
+    required: false
+    default: ""
   replay-proto-descriptor:
     description: "Optional compiled Protobuf FileDescriptorSet (.pb/.desc) for named-field Protobuf diffs"
     required: false
@@ -134,6 +142,10 @@ inputs:
     description: "Fully-qualified Protobuf response message name when using replay-proto-descriptor"
     required: false
     default: ""
+  auto-fix:
+    description: "Automatically create or update a self-healing AgentTask when verify or replay fails (true/false)"
+    required: false
+    default: "false"
   dry-run:
     description: "Render PreviewGroup manifest without applying to Kubernetes"
     required: false
@@ -209,7 +221,10 @@ runs:
         INPUT_REPLAY_IGNORE_FIELDS: ${{ inputs.replay-ignore-fields }}
         INPUT_REPLAY_FILTER_HOSTS: ${{ inputs.replay-filter-hosts }}
         INPUT_REPLAY_STRIP_AUTH: ${{ inputs.replay-strip-auth }}
+        INPUT_REPLAY_REDACT_QUERY: ${{ inputs.replay-redact-query }}
+        INPUT_REPLAY_REDACT_BODY_FIELDS: ${{ inputs.replay-redact-body-fields }}
         INPUT_REPLAY_PROTO_DESCRIPTOR: ${{ inputs.replay-proto-descriptor }}
         INPUT_REPLAY_PROTO_MESSAGE: ${{ inputs.replay-proto-message }}
+        INPUT_AUTO_FIX: ${{ inputs.auto-fix }}
         INPUT_DRY_RUN: ${{ inputs.dry-run }}
       run: "${{ github.action_path }}/scripts/ci-preview.sh"

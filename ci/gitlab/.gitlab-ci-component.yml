@@ -24,10 +24,58 @@ spec:
       description: "Optional staging/gateway URL to construct a shareable ?_diverge_env= preview URL"
       type: string
       default: ""
+    diverge_verify:
+      description: "Run diverge verify after preview deployment (true/false)"
+      type: string
+      default: "false"
+    diverge_verify_path:
+      description: "HTTP path to probe during diverge verify"
+      type: string
+      default: "/"
+    diverge_verify_max_latency:
+      description: "Maximum allowed HTTP latency during diverge verify (e.g. 5s)"
+      type: string
+      default: "5s"
     diverge_replay_from:
       description: "Optional HAR (.har) or JSONL (.jsonl) trace file path to run diverge replay after deployment"
       type: string
       default: ""
+    diverge_replay_strip_auth:
+      description: "Strip recorded Authorization, Cookie, X-Api-Key headers and auth query tokens during replay (true/false)"
+      type: string
+      default: "true"
+    diverge_replay_redact_query:
+      description: "Optional comma-separated query parameter names to redact during diverge replay"
+      type: string
+      default: ""
+    diverge_replay_redact_body_fields:
+      description: "Optional comma-separated JSON request body field paths to redact during diverge replay"
+      type: string
+      default: ""
+    diverge_replay_filter_hosts:
+      description: "Optional comma-separated host patterns to include during diverge replay"
+      type: string
+      default: ""
+    diverge_replay_ignore_fields:
+      description: "Optional comma-separated field paths or Protobuf field numbers to ignore during diverge replay"
+      type: string
+      default: ""
+    diverge_replay_max_latency:
+      description: "Optional maximum allowed preview latency per replayed request (e.g. 500ms)"
+      type: string
+      default: ""
+    diverge_replay_compare_values:
+      description: "Compare exact scalar values during diverge replay (true/false)"
+      type: string
+      default: "false"
+    diverge_replay_fail_on_extra_fields:
+      description: "Fail diverge replay when preview adds extra fields (true/false)"
+      type: string
+      default: "false"
+    diverge_auto_fix:
+      description: "Automatically trigger a self-healing AgentTask when verify or replay fails (true/false)"
+      type: string
+      default: "false"
     diverge_kubectl_version:
       description: "Version of kubectl to install"
       type: string
@@ -51,7 +99,19 @@ diverge:preview:
     DIVERGE_REGISTRY: $[[ inputs.diverge_registry ]]
     DIVERGE_NAMESPACE: $[[ inputs.diverge_namespace ]]
     DIVERGE_BASE_URL: $[[ inputs.diverge_base_url ]]
+    DIVERGE_VERIFY: $[[ inputs.diverge_verify ]]
+    DIVERGE_VERIFY_PATH: $[[ inputs.diverge_verify_path ]]
+    DIVERGE_VERIFY_MAX_LATENCY: $[[ inputs.diverge_verify_max_latency ]]
     DIVERGE_REPLAY_FROM: $[[ inputs.diverge_replay_from ]]
+    DIVERGE_REPLAY_STRIP_AUTH: $[[ inputs.diverge_replay_strip_auth ]]
+    DIVERGE_REPLAY_REDACT_QUERY: $[[ inputs.diverge_replay_redact_query ]]
+    DIVERGE_REPLAY_REDACT_BODY_FIELDS: $[[ inputs.diverge_replay_redact_body_fields ]]
+    DIVERGE_REPLAY_FILTER_HOSTS: $[[ inputs.diverge_replay_filter_hosts ]]
+    DIVERGE_REPLAY_IGNORE_FIELDS: $[[ inputs.diverge_replay_ignore_fields ]]
+    DIVERGE_REPLAY_MAX_LATENCY: $[[ inputs.diverge_replay_max_latency ]]
+    DIVERGE_REPLAY_COMPARE_VALUES: $[[ inputs.diverge_replay_compare_values ]]
+    DIVERGE_REPLAY_FAIL_ON_EXTRA_FIELDS: $[[ inputs.diverge_replay_fail_on_extra_fields ]]
+    DIVERGE_AUTO_FIX: $[[ inputs.diverge_auto_fix ]]
   artifacts:
     reports:
       dotenv: preview.env
@@ -149,7 +209,7 @@ diverge:preview:
 
       kubectl apply -f previewgroup.yaml
 
-      if [ -n "${DIVERGE_REPLAY_FROM:-}" ]; then
+      if [ "${DIVERGE_VERIFY:-false}" = "true" ] || [ -n "${DIVERGE_REPLAY_FROM:-}" ]; then
         if ! command -v diverge >/dev/null 2>&1; then
           curl -fsSL https://raw.githubusercontent.com/divergedev/diverge/main/install.sh | sh
         fi
@@ -171,11 +231,52 @@ diverge:preview:
           sleep 2
           kubectl wait -n "${DIVERGE_NAMESPACE}" --for=condition=Ready "previewgroup/${PREVIEW_NAME}" --timeout=180s
         done
+      fi
+
+      if [ "${DIVERGE_VERIFY:-false}" = "true" ]; then
+        set -- verify "${PREVIEW_NAME}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}" --path "${DIVERGE_VERIFY_PATH:-/}" --max-latency "${DIVERGE_VERIFY_MAX_LATENCY:-5s}"
         if [ -n "${DIVERGE_BASE_URL:-}" ]; then
-          diverge replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}" --base-url "${DIVERGE_BASE_URL}"
-        else
-          diverge replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}"
+          set -- "$@" --base-url "${DIVERGE_BASE_URL}"
         fi
+        if [ "${DIVERGE_AUTO_FIX:-false}" = "true" ]; then
+          set -- "$@" --auto-fix
+        fi
+        diverge "$@"
+      fi
+
+      if [ -n "${DIVERGE_REPLAY_FROM:-}" ]; then
+        set -- replay "${PREVIEW_NAME}" --from "${DIVERGE_REPLAY_FROM}" -n "${DIVERGE_NAMESPACE}" --header-key "${DIVERGE_HEADER_KEY}" --header-value "${HEADER_VALUE}"
+        if [ -n "${DIVERGE_BASE_URL:-}" ]; then
+          set -- "$@" --base-url "${DIVERGE_BASE_URL}"
+        fi
+        if [ "${DIVERGE_REPLAY_STRIP_AUTH:-true}" = "true" ]; then
+          set -- "$@" --strip-auth
+        fi
+        if [ -n "${DIVERGE_REPLAY_MAX_LATENCY:-}" ]; then
+          set -- "$@" --max-latency "${DIVERGE_REPLAY_MAX_LATENCY}"
+        fi
+        if [ "${DIVERGE_REPLAY_COMPARE_VALUES:-false}" = "true" ]; then
+          set -- "$@" --compare-values
+        fi
+        if [ "${DIVERGE_REPLAY_FAIL_ON_EXTRA_FIELDS:-false}" = "true" ]; then
+          set -- "$@" --fail-on-extra-fields
+        fi
+        if [ -n "${DIVERGE_REPLAY_FILTER_HOSTS:-}" ]; then
+          set -- "$@" --filter-host "${DIVERGE_REPLAY_FILTER_HOSTS}"
+        fi
+        if [ -n "${DIVERGE_REPLAY_IGNORE_FIELDS:-}" ]; then
+          set -- "$@" --ignore-field "${DIVERGE_REPLAY_IGNORE_FIELDS}"
+        fi
+        if [ -n "${DIVERGE_REPLAY_REDACT_QUERY:-}" ]; then
+          set -- "$@" --redact-query "${DIVERGE_REPLAY_REDACT_QUERY}"
+        fi
+        if [ -n "${DIVERGE_REPLAY_REDACT_BODY_FIELDS:-}" ]; then
+          set -- "$@" --redact-body-field "${DIVERGE_REPLAY_REDACT_BODY_FIELDS}"
+        fi
+        if [ "${DIVERGE_AUTO_FIX:-false}" = "true" ]; then
+          set -- "$@" --auto-fix
+        fi
+        diverge "$@"
       fi
 
       PREVIEW_URL=""

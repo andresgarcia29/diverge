@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ type verifyOptions struct {
 	timeout          time.Duration
 	outputJSON       bool
 	githubSummary    bool
+	autoFix          bool
 }
 
 func newVerifyCmd(app *App) *cobra.Command {
@@ -346,6 +348,19 @@ assertions, response substring checks, and optional baseline parity comparisons.
 			}
 
 			if !report.Passed {
+				if opts.autoFix {
+					var mdBuf bytes.Buffer
+					renderVerifyMarkdown(&mdBuf, *report)
+					statusWriter := out
+					if opts.outputJSON {
+						statusWriter = cmd.ErrOrStderr()
+					}
+					if taskName, fixErr := triggerCLIAutoFixTask(cmd.Context(), app, envName, ns, "verify", mdBuf.String()); fixErr != nil {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to trigger self-healing AgentTask: %v\n", fixErr)
+					} else {
+						_, _ = fmt.Fprintf(statusWriter, "Triggered self-healing AgentTask %s in namespace %s\n", taskName, ns)
+					}
+				}
 				return fmt.Errorf("verification failed for environment %s", envName)
 			}
 
@@ -369,6 +384,7 @@ assertions, response substring checks, and optional baseline parity comparisons.
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", 15*time.Second, "Per-request HTTP timeout")
 	cmd.Flags().BoolVar(&opts.outputJSON, "json", false, "Output verification report as JSON")
 	cmd.Flags().BoolVar(&opts.githubSummary, "github-summary", false, "Write a Markdown verification scorecard to $GITHUB_STEP_SUMMARY (or stdout if unset)")
+	cmd.Flags().BoolVar(&opts.autoFix, "auto-fix", false, "Automatically create or update an autonomous AgentTask when verification fails")
 
 	return cmd
 }

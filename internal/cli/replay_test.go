@@ -518,3 +518,107 @@ func TestReplayCmd_FilterHostAndStripAuthFlags(t *testing.T) {
 	assert.Empty(t, seenAuth)
 	assert.Empty(t, seenCustom)
 }
+
+func TestReplaySanitizeCmdAndAutoFix(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawTracePath := filepath.Join(tmpDir, "raw.jsonl")
+	cleanTracePath := filepath.Join(tmpDir, "clean.jsonl")
+	rawContent := `{"id":"login","method":"POST","path":"https://api.example.com/v1/login?token=jwt-secret&custom_q=cq-1&keep=yes","headers":{"Authorization":"Bearer tok","Content-Type":"application/json"},"body":"{\"password\":\"p@ss\",\"user\":\"alice\"}"}` + "\n" +
+		`{"id":"noise","method":"GET","path":"https://cdn.other.io/app.js"}` + "\n"
+	require.NoError(t, os.WriteFile(rawTracePath, []byte(rawContent), 0o644))
+
+	rootSanitize := NewRootCmd(&App{Namespace: "default"})
+	var sanOut bytes.Buffer
+	rootSanitize.SetOut(&sanOut)
+	rootSanitize.SetErr(&sanOut)
+	rootSanitize.SetArgs([]string{
+		"replay", "sanitize",
+		"--from", rawTracePath,
+		"--output", cleanTracePath,
+		"--filter-host", "api.example.com",
+		"--redact-query", "custom_q",
+		"--redact-body-field", "password",
+	})
+	require.NoError(t, rootSanitize.Execute())
+	assert.Contains(t, sanOut.String(), "Sanitized 1 trace entries")
+
+	entries, err := replay.LoadTrace(cleanTracePath)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.NotContains(t, entries[0].Path, "jwt-secret")
+	assert.NotContains(t, entries[0].Path, "cq-1")
+	assert.Contains(t, entries[0].Path, "keep=yes")
+	assert.NotContains(t, entries[0].Headers, "Authorization")
+	assert.Contains(t, entries[0].Body, `"password":"[REDACTED]"`)
+	assert.Contains(t, entries[0].Body, `"user":"alice"`)
+
+	// Verify --auto-fix creates and updates an AgentTask when replay or verify fails
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-diverge-env") == "pr-42" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user":"alice"}`))
+	}))
+	defer srv.Close()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, divergeiov1alpha1.AddToScheme(scheme))
+	env := &divergeiov1alpha1.Environment{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-42", Namespace: "default"},
+		Spec: divergeiov1alpha1.EnvironmentSpec{
+			Source: divergeiov1alpha1.EnvironmentSource{
+				Provider: "github",
+				Project:  "acme/checkout",
+				Branch:   "feat/checkout",
+				MR:       42,
+			},
+			Routing: divergeiov1alpha1.EnvironmentRouting{
+				Mode:        "header",
+				HeaderKey:   "x-diverge-env",
+				HeaderValue: "pr-42",
+			},
+		},
+		Status: divergeiov1alpha1.EnvironmentStatus{
+			Phase: divergeiov1alpha1.PhaseRunning,
+			URL:   srv.URL,
+		},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(env).Build()
+	app := &App{Namespace: "default", Client: fc}
+
+	rootAutoFix := NewRootCmd(app)
+	var fixOut bytes.Buffer
+	rootAutoFix.SetOut(&fixOut)
+	rootAutoFix.SetErr(&fixOut)
+	rootAutoFix.SetArgs([]string{"replay", "pr-42", "--from", cleanTracePath, "--base-url", srv.URL, "--auto-fix"})
+	require.Error(t, rootAutoFix.Execute())
+	assert.Contains(t, fixOut.String(), "Triggered self-healing AgentTask autofix-replay-pr-42")
+
+	var task divergeiov1alpha1.AgentTask
+	require.NoError(t, fc.Get(context.Background(), client.ObjectKey{Name: "autofix-replay-pr-42", Namespace: "default"}, &task))
+	assert.Equal(t, "https://github.com/acme/checkout", task.Spec.Repository.URL)
+	assert.Equal(t, "feat/checkout", task.Spec.Repository.WorkingBranch)
+	assert.Contains(t, task.Spec.Objective, "Diverge Traffic Replay Failed: pr-42")
+
+	// Second failure updates existing AgentTask with guidance annotation
+	rootAutoFix2 := NewRootCmd(app)
+	rootAutoFix2.SetOut(&fixOut)
+	rootAutoFix2.SetErr(&fixOut)
+	rootAutoFix2.SetArgs([]string{"replay", "pr-42", "--from", cleanTracePath, "--base-url", srv.URL, "--auto-fix"})
+	require.Error(t, rootAutoFix2.Execute())
+	require.NoError(t, fc.Get(context.Background(), client.ObjectKey{Name: "autofix-replay-pr-42", Namespace: "default"}, &task))
+	assert.Contains(t, task.Annotations["agent.diverge.io/guidance"], "Diverge Traffic Replay Failed: pr-42")
+
+	// Also test diverge verify --auto-fix
+	rootVerifyFix := NewRootCmd(app)
+	var verifyFixOut bytes.Buffer
+	rootVerifyFix.SetOut(&verifyFixOut)
+	rootVerifyFix.SetErr(&verifyFixOut)
+	rootVerifyFix.SetArgs([]string{"verify", "pr-42", "/v1/login", "--base-url", srv.URL, "--skip-doctor", "--auto-fix"})
+	require.Error(t, rootVerifyFix.Execute())
+	assert.Contains(t, verifyFixOut.String(), "Triggered self-healing AgentTask autofix-verify-pr-42")
+}

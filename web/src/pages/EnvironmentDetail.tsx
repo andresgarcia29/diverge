@@ -13,6 +13,7 @@ import { useState, useEffect } from 'react'
 import { stringify as yamlStringify } from 'yaml'
 import { TopologyView } from '@/components/topology/TopologyView'
 import { FlagsTab } from '@/components/FlagsTab'
+import { VerifyReplayTab } from '@/components/VerifyReplayTab'
 import { ArrowLeft, ExternalLink, Copy, Trash2, Clock, AlertCircle, CheckCircle, Wand2, Moon, Sun } from 'lucide-react'
 import {
   estimateEnvironmentHourlyCostUSD,
@@ -294,9 +295,14 @@ export default function EnvironmentDetail() {
               </span>
             )}
           </TabsTrigger>
+          <TabsTrigger value="verify-replay">Verify &amp; Replay</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           <TabsTrigger value="yaml">YAML</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="verify-replay">
+          <VerifyReplayTab namespace={namespace} environmentName={name} />
+        </TabsContent>
 
         <TabsContent value="topology">
           <Card>

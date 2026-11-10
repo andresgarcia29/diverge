@@ -152,15 +152,17 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, missingRes.IsError)
 
-	// Supports filter_hosts and strip_auth in MCP tool parameters
+	// Supports filter_hosts, strip_auth, redact_query_params, and redact_body_fields in MCP tool parameters
 	filteredArgs, err := json.Marshal(map[string]any{
-		"name":         "pr-99",
-		"base_url":     srv.URL,
-		"routing_key":  "pr-99",
-		"filter_hosts": []string{"api.example.com"},
-		"strip_auth":   true,
+		"name":                "pr-99",
+		"base_url":            srv.URL,
+		"routing_key":         "pr-99",
+		"filter_hosts":        []string{"api.example.com"},
+		"strip_auth":          true,
+		"redact_query_params": []string{"secret_q"},
+		"redact_body_fields":  []string{"password"},
 		"requests": []map[string]any{
-			{"id": "profile", "method": "GET", "path": "/api/v1/profile", "headers": map[string]string{"Authorization": "Bearer secret"}},
+			{"id": "profile", "method": "GET", "path": "/api/v1/profile?token=jwt-1&secret_q=sq-2", "headers": map[string]string{"Authorization": "Bearer secret"}, "body": `{"password":"pw"}`},
 			{"id": "thirdparty", "method": "GET", "path": "https://cdn.other.example/bundle.js"},
 		},
 	})
@@ -175,6 +177,8 @@ func TestMCPReplay_InlineJSONAndProtobuf(t *testing.T) {
 	require.NoError(t, json.Unmarshal(filteredRes.Content, &filteredReport))
 	assert.True(t, filteredReport.Passed)
 	assert.Equal(t, 1, filteredReport.TotalRequests)
+	assert.NotContains(t, filteredReport.Results[0].Path, "jwt-1")
+	assert.NotContains(t, filteredReport.Results[0].Path, "sq-2")
 	mu.Lock()
 	assert.Empty(t, baseProfileAuth)
 	assert.Empty(t, prevProfileAuth)

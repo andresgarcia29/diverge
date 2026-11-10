@@ -86,6 +86,10 @@ func NewServeMux(cfg ServeMuxConfig) (*http.ServeMux, *TunnelManager) {
 	meterHandler := NewLLMMeterHandler(cfg.Client, cfg.MacaroonVerifier, cfg.TokenStore, cfg.Logger)
 	mux.Handle("/api/v1/agenttask/meter", meterHandler)
 
+	verifyReplayHandler := NewVerifyReplayHandler(cfg.Client, cfg.K8sClient, cfg.Logger, cfg.AuditLogger)
+	mux.HandleFunc("/api/v1/environments/verify", verifyReplayHandler.HandleVerify)
+	mux.HandleFunc("/api/v1/environments/replay", verifyReplayHandler.HandleReplay)
+
 	// Serve the embedded web dashboard at root when enabled.
 	// Go 1.22+ ServeMux uses most-specific-match routing, so the ConnectRPC
 	// service paths (e.g., /diverge.v1alpha1.EnvironmentService/) registered

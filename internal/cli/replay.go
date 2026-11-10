@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	urlPkg "net/url"
@@ -9,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	divergeiov1alpha1 "github.com/divergedev/diverge/api/v1alpha1"
@@ -32,10 +36,13 @@ type replayOptions struct {
 	filterHosts        []string
 	stripHeaders       []string
 	stripAuth          bool
+	redactQueryParams  []string
+	redactBodyFields   []string
 	protoDescriptor    string
 	protoMessage       string
 	outputJSON         bool
 	githubSummary      bool
+	autoFix            bool
 }
 
 // newReplayCmd constructs the `diverge replay` subcommand for deterministic traffic replay and contract diffing.
@@ -104,6 +111,8 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 				FilterHosts:        opts.filterHosts,
 				StripHeaders:       opts.stripHeaders,
 				StripAuth:          opts.stripAuth,
+				RedactQueryParams:  opts.redactQueryParams,
+				RedactBodyFields:   opts.redactBodyFields,
 				DiffOptions: replay.DiffOptions{
 					CompareValues:     opts.compareValues,
 					FailOnExtraFields: opts.failOnExtraFields,
@@ -165,6 +174,19 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 			}
 
 			if !report.Passed {
+				if opts.autoFix {
+					var mdBuf bytes.Buffer
+					_ = replay.FormatMarkdown(&mdBuf, report)
+					statusWriter := out
+					if opts.outputJSON {
+						statusWriter = cmd.ErrOrStderr()
+					}
+					if taskName, fixErr := triggerCLIAutoFixTask(cmd.Context(), app, envName, ns, "replay", mdBuf.String()); fixErr != nil {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to trigger self-healing AgentTask: %v\n", fixErr)
+					} else {
+						_, _ = fmt.Fprintf(statusWriter, "Triggered self-healing AgentTask %s in namespace %s\n", taskName, ns)
+					}
+				}
 				return fmt.Errorf("traffic replay failed for environment %s (%d/%d requests failed)", envName, report.FailedRequests, report.TotalRequests)
 			}
 			return nil
@@ -186,13 +208,197 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 	cmd.Flags().StringSliceVar(&opts.ignoreFields, "ignore-field", nil, "Field name or path to ignore during diffing (repeatable, e.g. --ignore-field request_id)")
 	cmd.Flags().StringSliceVar(&opts.filterHosts, "filter-host", nil, "Retain only trace entries matching the given hostname or wildcard pattern (repeatable, e.g. --filter-host api.example.com --filter-host '*.example.com')")
 	cmd.Flags().StringSliceVar(&opts.stripHeaders, "strip-header", nil, "Request header name to strip before replaying (repeatable, e.g. --strip-header X-Internal-Token)")
-	cmd.Flags().BoolVar(&opts.stripAuth, "strip-auth", false, "Strip Authorization, Proxy-Authorization, Cookie, and X-Api-Key headers before replaying")
+	cmd.Flags().BoolVar(&opts.stripAuth, "strip-auth", false, "Strip Authorization, Proxy-Authorization, Cookie, X-Api-Key headers and auth query params before replaying")
+	cmd.Flags().StringSliceVar(&opts.redactQueryParams, "redact-query", nil, "Query parameter name to redact with [REDACTED] before replaying (repeatable)")
+	cmd.Flags().StringSliceVar(&opts.redactBodyFields, "redact-body-field", nil, "JSON request body field name or dot-path to redact before replaying (repeatable)")
 	cmd.Flags().StringVar(&opts.protoDescriptor, "proto-descriptor", "", "Optional path to compiled Protobuf FileDescriptorSet (.binpb) for schema-aware decoding")
 	cmd.Flags().StringVar(&opts.protoMessage, "proto-message", "", "Default fully-qualified Protobuf message type for response decoding")
 	cmd.Flags().BoolVar(&opts.outputJSON, "json", false, "Output replay report as JSON")
 	cmd.Flags().BoolVar(&opts.githubSummary, "github-summary", false, "Write Markdown replay report to $GITHUB_STEP_SUMMARY (or stdout, or stderr when --json is set)")
+	cmd.Flags().BoolVar(&opts.autoFix, "auto-fix", false, "Automatically create or update an autonomous AgentTask when contract replay fails")
+
+	cmd.AddCommand(newReplaySanitizeCmd())
 
 	return cmd
+}
+
+type replaySanitizeOptions struct {
+	fromFile          string
+	outputFile        string
+	stripAuth         bool
+	stripHeaders      []string
+	redactQueryParams []string
+	redactBodyFields  []string
+	filterHosts       []string
+}
+
+// newReplaySanitizeCmd constructs the `diverge replay sanitize` subcommand to convert and scrub raw HAR/JSON/JSONL traces into clean JSONL files.
+func newReplaySanitizeCmd() *cobra.Command {
+	opts := &replaySanitizeOptions{}
+
+	cmd := &cobra.Command{
+		Use:   "sanitize --from <raw.har|raw.json|raw.jsonl> [--output <clean.jsonl>]",
+		Short: "Convert and scrub credentials/PII from a HAR, JSON, or JSONL trace into a clean JSONL file",
+		Long: `Loads a raw browser/Playwright HAR (.har), JSON (.json), or JSONL (.jsonl) trace,
+filters entries by host if requested, strips authentication headers/cookies/query tokens,
+redacts sensitive JSON request body fields, and writes a deterministic, git-committable
+JSONL trace.`,
+		Example: `	# Sanitize a browser HAR export into a clean JSONL trace for Git
+	diverge replay sanitize --from ./recording.har --output ./traces/checkout.jsonl --filter-host api.example.com --redact-body-field password,cvv`,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(opts.fromFile) == "" {
+				return fmt.Errorf("--from trace file path is required")
+			}
+
+			entries, err := replay.LoadTrace(opts.fromFile)
+			if err != nil {
+				return err
+			}
+
+			sanitized := replay.SanitizeEntries(entries, replay.SanitizeOptions{
+				StripAuth:         opts.stripAuth,
+				StripHeaders:      opts.stripHeaders,
+				RedactQueryParams: opts.redactQueryParams,
+				RedactBodyFields:  opts.redactBodyFields,
+				FilterHosts:       opts.filterHosts,
+			})
+			if len(sanitized) == 0 {
+				return fmt.Errorf("0 trace entries remaining after sanitization/filtering")
+			}
+
+			outWriter := cmd.OutOrStdout()
+			outPath := strings.TrimSpace(opts.outputFile)
+			if outPath != "" && outPath != "-" {
+				f, err := os.Create(outPath)
+				if err != nil {
+					return fmt.Errorf("create output trace file %s: %w", outPath, err)
+				}
+				defer func() { _ = f.Close() }()
+				outWriter = f
+			}
+
+			if err := replay.WriteJSONL(outWriter, sanitized); err != nil {
+				return err
+			}
+
+			if outPath != "" && outPath != "-" {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Sanitized %d trace entries to %s\n", len(sanitized), outPath)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.fromFile, "from", "f", "", "Input trace file path (.har, .json, .jsonl, or '-' for stdin)")
+	cmd.Flags().StringVarP(&opts.outputFile, "output", "o", "", "Output JSONL file path (default: stdout)")
+	cmd.Flags().BoolVar(&opts.stripAuth, "strip-auth", true, "Strip Authorization, Cookie, X-Api-Key headers, userinfo, and auth query tokens")
+	cmd.Flags().StringSliceVar(&opts.stripHeaders, "strip-header", nil, "Additional request header name to strip (repeatable)")
+	cmd.Flags().StringSliceVar(&opts.redactQueryParams, "redact-query", nil, "Additional query parameter name to redact with [REDACTED] (repeatable)")
+	cmd.Flags().StringSliceVar(&opts.redactBodyFields, "redact-body-field", nil, "JSON request body field name or dot-path to redact with [REDACTED] (repeatable)")
+	cmd.Flags().StringSliceVar(&opts.filterHosts, "filter-host", nil, "Retain only entries matching the given hostname or wildcard pattern (repeatable)")
+
+	return cmd
+}
+
+// triggerCLIAutoFixTask creates or updates an autonomous AgentTask in Kubernetes seeded with the failure summary.
+func triggerCLIAutoFixTask(ctx context.Context, app *App, envName, ns, failureKind, markdownSummary string) (string, error) {
+	if app == nil {
+		return "", fmt.Errorf("cluster application context is nil")
+	}
+	c, _, err := app.KubeClient()
+	if err != nil || c == nil {
+		return "", fmt.Errorf("connect to cluster: %w", err)
+	}
+	if strings.TrimSpace(ns) == "" {
+		ns = "default"
+	}
+
+	repoURL := ""
+	branch := envName
+
+	var env divergeiov1alpha1.Environment
+	if getErr := c.Get(ctx, client.ObjectKey{Name: envName, Namespace: ns}, &env); getErr == nil {
+		repoURL, branch = resolveSourceRepoAndBranch(env.Spec.Source, envName)
+	} else {
+		var pg divergeiov1alpha1.PreviewGroup
+		if pgErr := c.Get(ctx, client.ObjectKey{Name: envName, Namespace: ns}, &pg); pgErr == nil {
+			repoURL, branch = resolveSourceRepoAndBranch(pg.Spec.Source, envName)
+		} else if pgErr2 := c.Get(ctx, client.ObjectKey{Name: envName}, &pg); pgErr2 == nil {
+			repoURL, branch = resolveSourceRepoAndBranch(pg.Spec.Source, envName)
+		}
+	}
+	if repoURL == "" {
+		return "", fmt.Errorf("cannot resolve source repository for %s; set spec.source.project", envName)
+	}
+
+	taskName := sanitizeDNSLabel(fmt.Sprintf("autofix-%s-%s", failureKind, envName))
+	if len(taskName) > 50 {
+		taskName = strings.TrimRight(taskName[:50], "-")
+	}
+	objective := fmt.Sprintf("Fix %s regression detected on preview environment %s:\n\n%s", failureKind, envName, strings.TrimSpace(markdownSummary))
+
+	var existing divergeiov1alpha1.AgentTask
+	getErr := c.Get(ctx, client.ObjectKey{Name: taskName, Namespace: ns}, &existing)
+	if getErr == nil {
+		if existing.Annotations == nil {
+			existing.Annotations = make(map[string]string)
+		}
+		existing.Annotations["agent.diverge.io/guidance"] = objective
+		existing.Spec.Objective = objective
+		existing.Spec.Suspended = false
+		if err := c.Update(ctx, &existing); err != nil {
+			return "", fmt.Errorf("update existing AgentTask %s: %w", taskName, err)
+		}
+		return taskName, nil
+	}
+	if !apierrors.IsNotFound(getErr) {
+		return "", fmt.Errorf("get AgentTask %s: %w", taskName, getErr)
+	}
+
+	task := &divergeiov1alpha1.AgentTask{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: ns,
+			Labels: map[string]string{
+				"diverge.io/environment": envName,
+				"diverge.io/autofix":     failureKind,
+			},
+		},
+		Spec: divergeiov1alpha1.AgentTaskSpec{
+			Objective: objective,
+			Repository: divergeiov1alpha1.AgentTaskRepository{
+				URL:           repoURL,
+				BaseBranch:    "main",
+				WorkingBranch: branch,
+			},
+			MaxIterations: 5,
+			DraftPR:       true,
+		},
+	}
+	if err := c.Create(ctx, task); err != nil {
+		return "", fmt.Errorf("create AgentTask %s: %w", taskName, err)
+	}
+	return taskName, nil
+}
+
+// resolveSourceRepoAndBranch derives a clone URL and working branch from an EnvironmentSource.
+func resolveSourceRepoAndBranch(src divergeiov1alpha1.EnvironmentSource, fallbackEnv string) (string, string) {
+	branch := strings.TrimSpace(src.Branch)
+	if branch == "" {
+		branch = fallbackEnv
+	}
+	project := strings.TrimSpace(src.Project)
+	if project == "" {
+		return "", branch
+	}
+	if strings.HasPrefix(project, "http://") || strings.HasPrefix(project, "https://") || strings.HasPrefix(project, "git@") {
+		return project, branch
+	}
+	if strings.EqualFold(src.Provider, "gitlab") {
+		return "https://gitlab.com/" + project, branch
+	}
+	return "https://github.com/" + project, branch
 }
 
 // resolveReplayRouting resolves the baseline URL, preview URL, routing header key/value, and namespace for a replay run.

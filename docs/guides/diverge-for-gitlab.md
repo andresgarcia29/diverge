@@ -36,13 +36,27 @@ The Diverge controller requires access to GitLab to post comments and validate w
 - `DIVERGE_WEBHOOK_SECRET`: Your configured webhook secret token.
 
 ## 4. Helm Values for GitLab
-To configure Diverge for GitLab integration, apply the following `values.yaml` during installation:
+Create the two Secrets in the release namespace, then point the chart at them:
 
-```yaml
-notifierProvider: gitlab
+```bash
+kubectl -n diverge-system create secret generic diverge-gitlab --from-literal=token=<api-scoped token>
+kubectl -n diverge-system create secret generic diverge-webhook-token --from-literal=token=<webhook secret>
 ```
 
-*Note: The Helm chart does not currently natively map the secrets to the required environment variables. You will need to patch the `diverge-controller-manager` deployment to include `DIVERGE_NOTIFIER_TOKEN` and `DIVERGE_WEBHOOK_SECRET` in its `env` list.*
+```yaml
+notifier:
+  provider: gitlab
+  baseUrl: https://gitlab.com          # or your self-hosted GitLab
+  tokenSecretRef:
+    name: diverge-gitlab               # sets DIVERGE_NOTIFIER_TOKEN
+    key: token
+webhook:
+  secretName: diverge-webhook-token    # sets DIVERGE_WEBHOOK_SECRET (key "token")
+  gitlabAllowedUsers: "12345,67890"    # numeric user IDs allowed to run slash commands
+defaultNamespace: diverge-previews     # where webhook-created Environments live
+```
+
+Anything the chart does not model can be passed with `extraArgs` (controller flags) and `extraEnv` (a list of `EnvVar`).
 
 ## 5. Single Service Setup
 For single-service repositories, the `Environment` CRD is deployed when a Merge Request webhook event is received. Ensure your `.diverge.yaml` maps the repository correctly:

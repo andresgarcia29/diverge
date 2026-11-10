@@ -221,3 +221,8 @@ func TestFormatPreviewGroupComment_TemplatesAndNoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, teardownMsg, "Diverge Preview — Destroyed")
 }
+
+func TestNewGitLabNotifierDefaultsBaseURL(t *testing.T) {
+	assert.Equal(t, "https://gitlab.com", NewGitLabNotifier("", "token").BaseURL)
+	assert.Equal(t, "https://gitlab.example.com", NewGitLabNotifier("https://gitlab.example.com", "token").BaseURL)
+}

@@ -58,6 +58,24 @@ webhook:
   admissionPolicy:
     enabled: false
 
+# -- Namespace for Environments created by webhooks and slash commands. Empty means "default".
+defaultNamespace: ""
+
+# MR/PR notifier: posts preview comments and reads .diverge.yaml from the source branch.
+notifier:
+  provider: "noop"  # gitlab | github | noop
+  # -- API base URL, e.g. https://gitlab.com or https://gitlab.example.com. Required for gitlab.
+  baseUrl: ""
+  # -- Secret holding the API token (GitLab: `api` scope). Sets DIVERGE_NOTIFIER_TOKEN.
+  tokenSecretRef:
+    name: ""
+    key: token
+
+# -- Extra controller arguments, appended after the chart's own flags.
+extraArgs: []
+# -- Extra controller environment variables (list of EnvVar).
+extraEnv: []
+
 deploy:
   provider: "noop"  # argocd | direct | noop
   manifestSourceType: "configmap"  # configmap | url (for direct deployer)

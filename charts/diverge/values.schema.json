@@ -136,6 +136,31 @@
         }
       }
     },
+    "defaultNamespace": { "type": "string" },
+    "notifierProvider": { "type": "string", "enum": ["", "gitlab", "github", "noop"] },
+    "notifier": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string", "enum": ["gitlab", "github", "noop"] },
+        "baseUrl": { "type": "string" },
+        "tokenSecretRef": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "key": { "type": "string" }
+          }
+        }
+      }
+    },
+    "extraArgs": { "type": "array", "items": { "type": "string" } },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      }
+    },
     "deploy": {
       "type": "object",
       "properties": {

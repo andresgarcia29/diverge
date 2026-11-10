@@ -59,6 +59,9 @@ spec:
         - --enable-agent-sandbox={{ .Values.sandbox.enabled }}
         - --sandbox-provider={{ .Values.sandbox.provider | default "agent-sandbox" }}
         {{- end }}
+        {{- range .Values.extraArgs }}
+        - {{ . | quote }}
+        {{- end }}
         command:
 
         - /diverge-controller
@@ -172,6 +175,22 @@ spec:
         {{- if and .Values.webhook .Values.webhook.gitlabAllowedUsers }}
         - name: DIVERGE_GITLAB_ALLOWED_USERS
           value: {{ .Values.webhook.gitlabAllowedUsers | quote }}
+        {{- end }}
+        {{- with .Values.notifier }}
+        {{- if .baseUrl }}
+        - name: DIVERGE_BASE_URL
+          value: {{ .baseUrl | quote }}
+        {{- end }}
+        {{- if and .tokenSecretRef .tokenSecretRef.name }}
+        - name: DIVERGE_NOTIFIER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .tokenSecretRef.name }}
+              key: {{ .tokenSecretRef.key | default "token" }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
         ports:
         - containerPort: {{ .Values.webhook.port }}

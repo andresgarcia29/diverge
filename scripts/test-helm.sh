@@ -136,5 +136,27 @@ if grep -q 'diverge-agenttask-tokens' <<< "$server_no_sandbox"; then
   exit 1
 fi
 
+echo '=== Helm template (notifier, extraArgs, extraEnv) ==='
+notifier_output=$(helm template diverge charts/diverge/ \
+  --set notifier.provider=gitlab \
+  --set notifier.baseUrl=https://gitlab.example.com \
+  --set notifier.tokenSecretRef.name=diverge-gitlab \
+  --set defaultNamespace=previews \
+  --set 'extraArgs={--zap-log-level=debug}' \
+  --set 'extraEnv[0].name=HTTPS_PROXY' \
+  --set 'extraEnv[0].value=http://proxy:3128')
+for expected in '--notifier-provider=gitlab' '--default-namespace=previews' '"--zap-log-level=debug"' \
+  'value: "https://gitlab.example.com"' 'name: diverge-gitlab' 'name: HTTPS_PROXY'; do
+  if ! grep -qF -- "$expected" <<< "$notifier_output"; then
+    echo "FAIL: Expected '$expected' in controller deployment"
+    exit 1
+  fi
+done
+if helm template diverge charts/diverge/ | grep -q 'DIVERGE_NOTIFIER_TOKEN'; then
+  echo 'FAIL: DIVERGE_NOTIFIER_TOKEN rendered without notifier.tokenSecretRef.name'
+  exit 1
+fi
+
 echo '✅ All Helm tests passed'
+
 

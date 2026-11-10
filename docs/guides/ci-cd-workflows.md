@@ -37,7 +37,7 @@ services:
 Use the official `divergedev/diverge@v0.22.0` GitHub Action to validate `.diverge.yaml`, run `diverge diff`, deploy a delta `PreviewGroup`, verify readiness and latency SLOs (`verify: "true"`), replay recorded traffic traces (`replay: "true"` with `replay-from` set to a `.jsonl` or `.har` trace file), optionally trigger self-healing `AgentTask` runs on failure (`auto-fix: "true"`), and expose routing headers to Playwright or Cypress:
 
 > [!WARNING]
-> **Sanitize replay traces before replaying in PR workflows**: Use `diverge record` or `diverge replay sanitize` to scrub live credentials and sensitive fields before committing `.jsonl` / `.har` trace files, or enable `replay-strip-auth: "true"`, `replay-redact-query`, and `replay-redact-body-fields` in CI.
+> **Sanitize replay traces before replaying in PR workflows**: Always scrub live credentials, PII, and sensitive request or response bodies from `.jsonl` / `.har` trace files using `diverge record` (with `--redact-body-field`) or `diverge replay sanitize` **before committing them to your repository**. Enabling `replay-strip-auth: "true"`, `replay-redact-query`, and `replay-redact-body-fields` in CI provides an additional in-flight safeguard during replay, not an alternative to pre-commit trace sanitization.
 
 ```yaml
 name: Preview Environment
@@ -184,8 +184,8 @@ e2e_preview:
     - EXTRA_HTTP_HEADERS="$(echo "$DIVERGE_ROUTING_HEADER_B64" | base64 -d)" npx playwright test
 ```
 
-> [!TIP]
-> **Built-in credential & PII redaction in GitLab CI**: The GitLab CI component enables `diverge_replay_strip_auth: "true"` by default and supports `diverge_replay_redact_query`, `diverge_replay_redact_body_fields`, `diverge_replay_filter_hosts`, `diverge_replay_ignore_fields`, `diverge_replay_max_latency`, and `diverge_auto_fix`. Always sanitize traces before committing them to your repository using `diverge record` or `diverge replay sanitize`.
+> [!WARNING]
+> **Sanitize replay traces before committing to GitLab repositories**: Always scrub live credentials and sensitive request/response bodies from `.jsonl` / `.har` trace files using `diverge record` (with `--redact-body-field`) or `diverge replay sanitize` **before committing them**. The GitLab CI component's `diverge_replay_strip_auth` (`"true"` by default), `diverge_replay_redact_query`, and `diverge_replay_redact_body_fields` inputs provide an additional runtime safeguard during replay, not a replacement for sanitizing committed trace files.
 
 ### Manual CLI Pipeline
 

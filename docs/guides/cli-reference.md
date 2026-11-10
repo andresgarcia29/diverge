@@ -31,7 +31,7 @@ The `diverge` CLI manages your local development environments and interacts with
 | `diverge preview delete <name>` | Delete a preview group |
 | `diverge preview watch <name>` | Watch a preview group until Ready/Failed |
 | `diverge providers list` | List all registered providers |
-| `diverge record [env] --target <url>` | Capture and sanitize live HTTP, ConnectRPC, and Protobuf/gRPC traffic into a replayable `.jsonl` trace |
+| `diverge record [env] --target <url>` | Capture and sanitize live HTTP, ConnectRPC, gRPC-Web, and binary Protobuf-over-HTTP traffic into a replayable `.jsonl` trace |
 | `diverge replay <env> --from <trace>` | Replay recorded HTTP, ConnectRPC, and Protobuf/gRPC traces against baseline and preview (`--auto-fix` for self-healing) |
 | `diverge replay sanitize --from <trace>` | Sanitize a `.har`, `.json`, or `.jsonl` trace offline by stripping credentials and redacting query/JSON body fields |
 | `diverge route <service>` | Simulate request routing to a service through the topology |
@@ -333,12 +333,15 @@ diverge verify pr-42 --path /healthz --compare-baseline --github-summary
 
 ### `diverge record`
 
-Start a local reverse-proxy recorder that forwards incoming HTTP, ConnectRPC, and Protobuf/gRPC requests to an upstream target URL (or a Diverge preview environment's gateway URL with automatic routing header injection), scrubs credentials and sensitive fields in flight, and writes a deterministic `.jsonl` trace ready for `diverge replay`.
+Start a local HTTP reverse-proxy recorder that forwards incoming HTTP/1.1, ConnectRPC, gRPC-Web, and binary Protobuf-over-HTTP requests to an upstream target URL (or a Diverge preview environment's gateway URL with automatic routing header injection) and writes a deterministic `.jsonl` trace for `diverge replay`.
+
+> [!WARNING]
+> **Redaction limits before saving or committing traces**: By default (`--strip-auth=true`), `diverge record` strips `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Api-Key` headers, URL userinfo, and default auth query tokens. **JSON request body fields are not redacted by default** — you must explicitly pass `--redact-body-field <field>` (e.g., `--redact-body-field password,cvv`) to scrub sensitive JSON fields, and binary request bodies (`application/proto`, `application/octet-stream`) are captured as base64 and cannot be field-redacted. Verify these limits before saving or committing recorded traces.
 
 **Usage:** `diverge record [env-name] --target <upstream-url> --output <trace.jsonl> [flags]`
 
 **Flags:**
-- `-t, --target` — Upstream HTTP/gRPC target URL to proxy and record (optional when `[env-name]` is provided)
+- `-t, --target` — Upstream HTTP target URL to proxy and record (optional when `[env-name]` is provided)
 - `-l, --listen` — Local address for the recording reverse proxy (default: `127.0.0.1:8095`)
 - `-o, --output` — Output JSONL trace file path, or `-` for stdout (default: `trace.jsonl`)
 - `--strip-auth` — Strip `Authorization`, `Cookie`, `X-Api-Key` headers, URL userinfo, and default auth query tokens (default: `true`)

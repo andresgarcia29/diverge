@@ -98,6 +98,9 @@ describe('VerifyReplayTab', () => {
               statusMatch: true,
               breakingDiffCount: 1,
               passed: false,
+              extractedVars: {
+                order_id: 'ord-prev-99',
+              },
               contractDiffs: [
                 {
                   path: '$.totalCents',
@@ -142,6 +145,7 @@ describe('VerifyReplayTab', () => {
 
     expect(screen.getByText(/Contract Replay Failed/i)).toBeInTheDocument()
     expect(screen.getByText('POST /api/orders')).toBeInTheDocument()
+    expect(screen.getByText('order_id=ord-prev-99')).toBeInTheDocument()
     expect(screen.getByText('$.totalCents')).toBeInTheDocument()
     expect(screen.getByText('autofix-pr-42-replay')).toBeInTheDocument()
   })

@@ -266,3 +266,31 @@ func TestProperty_SanitizeURLAndJSONBodyNeverLeaksSensitiveValues(t *testing.T) 
 		assert.Contains(t, string(redactedOnce), safeVal)
 	})
 }
+
+// TestProperty_InterpolateAndExtractRoundTrip verifies that any JSON scalar extracted via ExtractResponseVars
+// is deterministically substituted by InterpolateString without altering surrounding literal path segments.
+func TestProperty_InterpolateAndExtractRoundTrip(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		varKey := "var_" + rapid.StringMatching(`[a-z]{3,8}`).Draw(t, "varKey")
+		varVal := "id-" + rapid.StringMatching(`[a-zA-Z0-9_-]{4,16}`).Draw(t, "varVal")
+		prefix := "/api/v1/" + rapid.StringMatching(`[a-z]{3,8}`).Draw(t, "prefix") + "/"
+		suffix := "/details"
+
+		bodyBytes, err := json.Marshal(map[string]any{
+			"data": map[string]any{
+				"id": varVal,
+			},
+		})
+		require.NoError(t, err)
+
+		extracted, err := ExtractResponseVars(map[string]string{
+			varKey: "$.data.id",
+		}, http.StatusOK, nil, bodyBytes)
+		require.NoError(t, err)
+		assert.Equal(t, varVal, extracted[varKey])
+
+		templatePath := prefix + "{{" + varKey + "}}" + suffix
+		interpolated := InterpolateString(templatePath, extracted)
+		assert.Equal(t, prefix+varVal+suffix, interpolated)
+	})
+}

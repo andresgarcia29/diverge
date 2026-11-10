@@ -24,6 +24,7 @@ type RequestEntry struct {
 	BodyBase64   string            `json:"body_base64,omitempty"`
 	ProtoMessage string            `json:"proto_message,omitempty"`
 	ExpectStatus int               `json:"expect_status,omitempty"`
+	Extract      map[string]string `json:"extract,omitempty"`
 }
 
 // rawRequestEntry supports both snake_case and camelCase JSON keys when unmarshaling trace entries.
@@ -40,6 +41,7 @@ type rawRequestEntry struct {
 	ProtoMsgCamel    string            `json:"protoMessage,omitempty"`
 	ExpectStatus     int               `json:"expect_status,omitempty"`
 	ExpectStatusCame int               `json:"expectStatus,omitempty"`
+	Extract          map[string]string `json:"extract,omitempty"`
 }
 
 // normalize validates and converts a raw unmarshaled trace entry into a canonical RequestEntry.
@@ -91,6 +93,21 @@ func (r rawRequestEntry) normalize(index int) (RequestEntry, error) {
 		id = fmt.Sprintf("req-%d", index+1)
 	}
 
+	var extract map[string]string
+	if len(r.Extract) > 0 {
+		extract = make(map[string]string, len(r.Extract))
+		for k, v := range r.Extract {
+			tk := strings.TrimSpace(k)
+			tv := strings.TrimSpace(v)
+			if tk != "" && tv != "" {
+				extract[tk] = tv
+			}
+		}
+		if len(extract) == 0 {
+			extract = nil
+		}
+	}
+
 	return RequestEntry{
 		ID:           id,
 		Method:       method,
@@ -100,6 +117,7 @@ func (r rawRequestEntry) normalize(index int) (RequestEntry, error) {
 		BodyBase64:   bodyB64,
 		ProtoMessage: protoMsg,
 		ExpectStatus: expectStatus,
+		Extract:      extract,
 	}, nil
 }
 

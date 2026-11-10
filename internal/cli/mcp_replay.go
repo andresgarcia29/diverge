@@ -37,11 +37,13 @@ var replaySchema = json.RawMessage(`{
 					"body": {"type": "string"},
 					"body_base64": {"type": "string"},
 					"proto_message": {"type": "string"},
-					"expect_status": {"type": "integer"}
+					"expect_status": {"type": "integer"},
+					"extract": {"type": "object", "description": "Optional variable extraction rules mapping variable names to selectors (e.g. $.id, $header.X-Session, $status)"}
 				},
 				"required": ["path"]
 			}
 		},
+		"sequential": {"type": "boolean", "description": "Execute trace entries strictly sequentially in trace order (auto-enabled when entries use extract or {{var}} chaining)"},
 		"compare_values": {"type": "boolean", "description": "Compare exact scalar values in addition to JSON/Protobuf field types and wire schema"},
 		"fail_on_extra_fields": {"type": "boolean", "description": "Treat newly added JSON keys or Protobuf tags in preview as breaking"},
 		"ignore_fields": {"type": "array", "items": {"type": "string"}, "description": "Field names or paths to ignore during contract diffing"},
@@ -64,6 +66,7 @@ type mcpReplayParams struct {
 	RoutingKey        string          `json:"routing_key"`
 	TraceFile         string          `json:"trace_file"`
 	Requests          json.RawMessage `json:"requests"`
+	Sequential        bool            `json:"sequential"`
 	CompareValues     bool            `json:"compare_values"`
 	FailOnExtraFields bool            `json:"fail_on_extra_fields"`
 	IgnoreFields      []string        `json:"ignore_fields"`
@@ -200,6 +203,7 @@ func registerReplay(registry mcpruntime.Registry, client divergev1alpha1connect.
 			PreviewBaseURL:     previewURL,
 			HeaderKey:          headerKey,
 			HeaderValue:        headerValue,
+			Sequential:         params.Sequential,
 			MaxLatency:         maxLatency,
 			FailOnStatusDiff:   true,
 			FailOnContractDiff: true,

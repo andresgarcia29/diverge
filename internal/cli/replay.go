@@ -26,6 +26,7 @@ type replayOptions struct {
 	headerKey          string
 	headerValue        string
 	concurrency        int
+	sequential         bool
 	timeout            time.Duration
 	maxLatency         time.Duration
 	compareValues      bool
@@ -104,6 +105,7 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 				HeaderKey:          headerKey,
 				HeaderValue:        headerValue,
 				Concurrency:        opts.concurrency,
+				Sequential:         opts.sequential,
 				Timeout:            opts.timeout,
 				MaxLatency:         opts.maxLatency,
 				FailOnStatusDiff:   opts.failOnStatusDiff,
@@ -199,6 +201,7 @@ and binary Protobuf / gRPC / ConnectRPC wire tags (or typed descriptors via --pr
 	cmd.Flags().StringVar(&opts.headerKey, "header-key", "", "Override routing header key (default: x-diverge-env)")
 	cmd.Flags().StringVar(&opts.headerValue, "header-value", "", "Override routing header value (default: environment name)")
 	cmd.Flags().IntVarP(&opts.concurrency, "concurrency", "c", replay.DefaultConcurrency, "Number of concurrent replay workers")
+	cmd.Flags().BoolVar(&opts.sequential, "sequential", false, "Execute trace entries strictly sequentially in trace order (auto-enabled when entries use extract or {{var}} chaining)")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", replay.DefaultTimeout, "Per-request HTTP timeout")
 	cmd.Flags().DurationVar(&opts.maxLatency, "max-latency", 0, "Maximum acceptable preview response latency per request (e.g. 500ms)")
 	cmd.Flags().BoolVar(&opts.compareValues, "compare-values", false, "Compare exact scalar values in addition to JSON/Protobuf field types and wire schema")
